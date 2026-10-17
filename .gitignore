@@ -1,0 +1,38 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# 构建产物与打包产物
+dist-server
+release
+
+# 运行时数据（含 AI API key，严禁入库）
+cpp-ide-data
+ide-data
+.ide-tmp
+
+# 用户工作区与本地备份
+workspace
+_backup-*/
+_tmp-*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
