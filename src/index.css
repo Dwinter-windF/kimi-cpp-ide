@@ -1,0 +1,360 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.625rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ============================================================================
+   亮/暗配色方案（全局唯一色板来源）
+
+   1) :root 放暗色值 —— 与迁移前的硬编码色一一对应，因此暗色观感与改动前完全一致；
+      :root[data-theme="light"] 覆盖同一组变量，切换由 App.tsx 写
+      document.documentElement.dataset.theme 完成（无需刷新页面）。
+   2) 命名统一加 --ide- 前缀：index.css 上方（shadcn）已经占用了
+      --border / --accent / --ring / --input / --muted 等同名变量，它们被
+      tailwind.config.js 包在 hsl() 里使用（如 border-border → hsl(var(--border))、
+      通配规则 `* { @apply border-border }`）。若用同名变量覆盖成 hex，
+      这些声明会变成“计算值非法”从而整条失效，暗色下边框/关闭按钮底色会跟着变，
+      故这里统一用 --ide-* 命名，绝不与既有 token 冲突。
+   3) --ide-rainbow-0..5 供 EditorPane 的括号彩虹按嵌套深度取色（写进装饰的
+      inline style 里，用 var() 即可自动跟随主题，无需重建装饰）。
+   ========================================================================== */
+:root {
+  /* —— 背景 —— */
+  --ide-bg-base: #16161e; /* 应用主背景 / 工具栏 / 侧栏 / 底部面板 / 编辑器 / 代码块 */
+  --ide-bg-panel: #1a1b26; /* 面板、对话框、右键菜单、气泡、tooltip、激活标签页 */
+  --ide-bg-elevated: #24283b; /* 比面板略亮的块（AI 头像底） */
+  --ide-bg-code: #292e42; /* 行内 code 底、折叠占位符底 */
+  --ide-term-bg: #16161e; /* 终端/输出区底色（暗色下与主背景相同） */
+  /* —— 边框 / 交互背景 —— */
+  --ide-border: #1f2335; /* 细分割线（面板之间、表头） */
+  --ide-border-strong: #292e42; /* 输入框 / 菜单 / 对话框边框 */
+  --ide-hover: #1f2335; /* 行 hover 背景 */
+  --ide-selected: #283457; /* 选中行 / 用户气泡 / 补全选中项背景 */
+  /* —— 文字 —— */
+  --ide-text: #c0caf5; /* 主文字 */
+  --ide-text-dim: #8b93b8; /* 次文字 */
+  --ide-text-muted: #565f89; /* 弱化文字 / 注释 / 说明 */
+  --ide-text-faint: #3b4261; /* 占位符 / 空态提示 / 禁用 */
+  /* —— 强调色 —— */
+  --ide-accent: #7aa2f7; /* 强调蓝：焦点边框、图标、光标、当前标签下划线 */
+  --ide-accent-strong: #3d59a1; /* 强调深蓝：主按钮底、复选框选中、匹配括号底 */
+  /* —— 语义色 —— */
+  --ide-success: #9ece6a;
+  --ide-error: #f7768e;
+  --ide-warning: #e0af68;
+  --ide-info: #7dcfff;
+  --ide-cyan: #2ac3de;
+  --ide-purple: #9d7cd8;
+  --ide-purple-bright: #bb9af7;
+  --ide-error-bg: #3a2430; /* AI 错误头像底 */
+  /* —— 带 alpha 的派生色 —— */
+  --ide-error-soft: #f7768e44;
+  --ide-watch-flash: rgba(224, 175, 104, 0.45); /* index.html 的监视闪烁关键帧 */
+  /* —— AI 修复 diff 预览底色（新增/删除行，亮暗各一套，见下方 light 覆盖） —— */
+  --ide-diff-add-bg: #1c3326; /* 暗色：深绿底 */
+  --ide-diff-del-bg: #38222c; /* 暗色：深红底 */
+  /* —— 括号彩虹（按嵌套深度 0→5） —— */
+  --ide-rainbow-0: #f7768e;
+  --ide-rainbow-1: #e0af68;
+  --ide-rainbow-2: #9ece6a;
+  --ide-rainbow-3: #2ac3de;
+  --ide-rainbow-4: #7aa2f7;
+  --ide-rainbow-5: #bb9af7;
+}
+
+:root[data-theme="light"] {
+  /* 亮色方案：浅底深字，各级文字对比度均 ≥ 暗色方案（详见回报中的对比度表） */
+  color-scheme: light; /* 原生 select 弹层 / 滚动条跟随亮色（暗色下不设置，保持现状） */
+  --ide-bg-base: #f3f4f8;
+  --ide-bg-panel: #ffffff;
+  --ide-bg-elevated: #eceef5;
+  --ide-bg-code: #e9ecf5;
+  --ide-term-bg: #f1f3f9;
+  --ide-border: #e3e6f0;
+  --ide-border-strong: #ccd2e1;
+  --ide-hover: #e9ebf3;
+  --ide-selected: #d9e4f7;
+  --ide-text: #1f2333;
+  --ide-text-dim: #4a526b;
+  --ide-text-muted: #5d6684;
+  --ide-text-faint: #6e778f;
+  --ide-accent: #2f6fd0;
+  --ide-accent-strong: #3b62c4;
+  --ide-success: #2f7d32;
+  --ide-error: #c62f4b;
+  --ide-warning: #8a6100;
+  --ide-info: #0f6f9e;
+  --ide-cyan: #0e7a91;
+  --ide-purple: #6b46c1;
+  --ide-purple-bright: #6d28d9;
+  --ide-error-bg: #fde8ec;
+  --ide-error-soft: #c62f4b26;
+  --ide-watch-flash: rgba(197, 138, 20, 0.35);
+  --ide-diff-add-bg: #e2f4e6; /* 亮色：浅绿底（配 --ide-success 深绿字） */
+  --ide-diff-del-bg: #fde8ec; /* 亮色：浅红底（配 --ide-error 深红字） */
+  --ide-rainbow-0: #c62f4b;
+  --ide-rainbow-1: #b45309;
+  --ide-rainbow-2: #2f7d32;
+  --ide-rainbow-3: #0e7a91;
+  --ide-rainbow-4: #2f6fd0;
+  --ide-rainbow-5: #6b46c1;
+}
+
+/* 编辑器底色兜底: 跟随当前配色（暗色下取值仍是 #16161e，观感不变）。
+   注意：这里带 !important，EditorPane 的主题对象也必须在 & 上写同一个底色值。 */
+.cm-editor {
+  background-color: var(--ide-bg-base) !important;
+}
+/* CM 面板容器（查找替换面板）的层级必须低于设置对话框（z-50），否则同时开启时会盖住对话框 */
+.cm-editor .cm-panels {
+  z-index: 30;
+}
+.cm-content {
+  caret-color: var(--ide-accent);
+}
+
+/* ============================================================================
+   界面微动画（纯 CSS：transition / @keyframes，不使用任何动画库，不新增依赖）
+   1) 时长与缓动统一由下面的 CSS 变量定义，单次过渡一律 ≤ 250ms（--anim-max）；
+   2) 只动 background-color / color / border-color / opacity / transform，
+      全部是不触发重排、多数可走合成层的属性；
+   3) 高频刷新区域（编辑器内容、底部面板终端输出行、问题列表行、调用栈表格、
+      文件树每一行）不加出现动画 / 循环动画，文件树行只保留 hover 的
+      background-color 过渡（单属性、零每帧开销）。
+   ========================================================================== */
+:root {
+  --anim-fast: 120ms;                          /* 悬停 / 按下等即时反馈 */
+  --anim-med: 200ms;                           /* 面板内容淡入、消息气泡出现 */
+  --anim-max: 250ms;                           /* 硬上限：任何单次过渡都不得超过 */
+  --anim-ease: cubic-bezier(0.22, 1, 0.36, 1); /* ease-out：起步快、收尾缓 */
+}
+
+@keyframes kimi-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes kimi-pop-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+/* Radix 对话框内容用 translate(-50%,-50%) 居中：缩放必须和位移写在同一个
+   transform 里，否则动画期间会把居中位移覆盖掉、出现跳位。 */
+@keyframes kimi-pop-in-center {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes kimi-rise-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes kimi-menu-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* —— 1. 按钮 / 图标按钮：背景、文字、边框过渡；按下缩放回弹 —— */
+button:not(:disabled) {
+  transition-property: background-color, border-color, color, transform;
+  transition-duration: var(--anim-fast);
+  transition-timing-function: var(--anim-ease);
+}
+/* 按下：轻微缩小；松开后按上面的 fast 过渡弹回原尺寸 */
+button:not(:disabled):active {
+  transform: scale(0.97);
+  transition-duration: 80ms;
+}
+/* 图标按钮（组件里显式挂 .kimi-pop）：悬停放大、按下回弹更明显 */
+html .kimi-pop:hover {
+  transform: scale(1.05);
+}
+html .kimi-pop:active {
+  transform: scale(0.94);
+  transition-duration: 80ms;
+}
+
+/* —— 2. 文件树节点：hover / 选中背景过渡（仅 background-color） —— */
+html .kimi-tree-row {
+  transition: background-color var(--anim-fast) var(--anim-ease),
+    color var(--anim-fast) var(--anim-ease);
+}
+
+/* —— 3. 底部面板页签内容淡入（切页签时重新挂载该类名，200ms） —— */
+html .kimi-tab-fade {
+  animation: kimi-fade-in var(--anim-med) var(--anim-ease) both;
+}
+
+/* —— 4. 对话框：遮罩淡入 + 面板 0.96→1 淡入；关闭直接卸载，即时消失 —— */
+html .kimi-overlay-in {
+  animation: kimi-fade-in var(--anim-fast) var(--anim-ease) both;
+}
+html .kimi-dialog-pop {
+  animation: kimi-pop-in 160ms var(--anim-ease) both;
+}
+html .kimi-dialog-pop-center {
+  animation: kimi-pop-in-center 160ms var(--anim-ease) both;
+}
+
+/* —— 5. AI 面板消息气泡：上滑 6px + 淡入（新气泡挂载时播放一次） —— */
+html .kimi-bubble-in {
+  animation: kimi-rise-in 180ms var(--anim-ease) both;
+}
+
+/* —— 6. 弹出菜单（文件树右键菜单等）：淡入 + 向下 4px 位移 —— */
+html .kimi-menu-in {
+  animation: kimi-menu-in 130ms var(--anim-ease) both;
+}
+/* 通用 Radix 菜单 / 下拉内容：打开时同样淡入 + 微小位移（关闭动画保持原样）。
+   加上 html 前缀提升优先级，稳压组件里 data-[state=open]:animate-in 的入场动画。 */
+html [data-slot="dropdown-menu-content"][data-state="open"],
+html [data-slot="context-menu-content"][data-state="open"],
+html [data-slot="menubar-content"][data-state="open"],
+html [data-slot="select-content"][data-state="open"],
+html [data-slot="popover-content"][data-state="open"] {
+  animation: kimi-menu-in 130ms var(--anim-ease);
+}
+
+/* —— 7. 工具栏下拉触发器（原生 <select>）：边框 / 背景过渡 ——
+   注：原生 select 弹出的候选列表由操作系统绘制，CSS 无法让它淡入或位移，
+   因此这里只对触发器本身做过渡；应用内的下拉菜单统一由上面的 data-slot 规则覆盖。 */
+html .kimi-select {
+  transition: border-color var(--anim-fast) var(--anim-ease),
+    background-color var(--anim-fast) var(--anim-ease);
+}
+
+/* —— 8. 编辑器标签页：背景 / 文字过渡 —— */
+html .kimi-tab {
+  transition: background-color var(--anim-fast) var(--anim-ease),
+    color var(--anim-fast) var(--anim-ease);
+}
+
+/* 监视变量值变化闪烁（.kimi-watch-flash，定义在 index.html 的内联 <style> 中）
+   属于既有动画，本文件不覆盖、不改动。 */
+
+/* —— 9. 拖拽导入（资源管理器 → 工作区）：主区域虚线高亮框 + 结果提示条 ——
+   覆盖层本身 pointer-events: none：否则它一出现就会把后续的 dragleave/drop 引到自己身上，
+   导致高亮框反复闪烁、drop 也落不到布局容器上。
+   配色全部走 --ide-* 变量，暗色 / 亮色主题自动跟随。 */
+.kimi-drop-overlay {
+  pointer-events: none;
+  /* color-mix 不可用的旧浏览器回退到不透明底色（拖拽期间本来就是模态观感） */
+  background-color: var(--ide-bg-base);
+  background-color: color-mix(in srgb, var(--ide-bg-base) 78%, transparent);
+  animation: kimi-fade-in var(--anim-fast) var(--anim-ease) both;
+}
+.kimi-drop-card {
+  border: 2px dashed var(--ide-accent);
+  background-color: var(--ide-bg-panel);
+  box-shadow: 0 0 0 1px var(--ide-accent-strong) inset, 0 10px 30px rgba(0, 0, 0, 0.35);
+  animation: kimi-drop-pulse 1.1s var(--anim-ease) infinite alternate;
+}
+/* 虚线框呼吸：只动 border-color 与 transform，不触发布局重排 */
+@keyframes kimi-drop-pulse {
+  from {
+    border-color: var(--ide-accent-strong);
+    transform: scale(0.99);
+  }
+  to {
+    border-color: var(--ide-accent);
+    transform: scale(1.01);
+  }
+}
+.kimi-drop-result {
+  border: 1px solid var(--ide-border-strong);
+  background-color: var(--ide-bg-panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  animation: kimi-rise-in var(--anim-med) var(--anim-ease) both;
+}
+
+/* ============================================================================
+   prefers-reduced-motion: reduce —— 全局关闭本单新增的动效。
+   时长压到 0.01ms 而不是 0s：动画 / 过渡仍会正常触发
+   animationend / transitionend，依赖这些事件的库（如 Radix 的退出动画探测）
+   不会卡住，但视觉上瞬时完成。
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* 监视变量值闪烁是状态提示（纯背景色变化，无位移），按需求保留原动画 */
+  .kimi-watch-flash {
+    animation-duration: 0.9s !important;
+  }
+}
