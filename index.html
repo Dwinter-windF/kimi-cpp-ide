@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kimi C++ IDE</title>
+    <style>
+      /* 监视变量值变化时的高亮闪烁：颜色改为 CSS 变量，跟随亮/暗配色
+         （暗色下 var(--ide-watch-flash) = rgba(224,175,104,.45)，与改动前完全一致） */
+      @keyframes kimi-watch-flash {
+        0% { background-color: var(--ide-watch-flash); }
+        100% { background-color: transparent; }
+      }
+      .kimi-watch-flash {
+        animation: kimi-watch-flash 0.9s ease-out;
+        border-radius: 3px;
+        padding: 0 3px;
+        margin: 0 -3px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
