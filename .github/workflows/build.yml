@@ -1,0 +1,62 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build server bundle
+        run: node scripts/build-server-bundle.mjs
+
+      - name: Package (zip target only)
+        run: npx electron-builder --win zip
+
+      # --- SignPath 签名（批准接入后取消注释；需在仓库装 SignPath GitHub App 并在面板配置 signing policy）---
+      # - name: Submit signing request to SignPath
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+      #     project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+      #     signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+      #     github-artifact-name: app-unsigned
+      #     wait-for-completion: true
+      #     output-artifact-name: app-signed
+      #
+      # - name: Re-package zip with signed exe
+      #   run: |
+      #     Expand-Archive release/*.zip -DestinationPath _signed
+      #     # 用签名后的 exe 替换解包目录内的同名文件后重新压缩，再发布到 GitHub Releases
+      #     shell: pwsh
+
+      - name: Upload unsigned artifact (zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-unsigned
+          path: release/*.zip
+          if-no-files-found: error
+
+      - name: Upload unsigned artifact (win-unpacked)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-unsigned-unpacked
+          path: release/win-unpacked
+          if-no-files-found: error
