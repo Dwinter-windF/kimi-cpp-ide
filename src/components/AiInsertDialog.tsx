@@ -4,11 +4,12 @@ import { aiConfigHint, isAiConfigured } from "@/lib/ai";
 import {
   buildInsertContext,
   requestCodeFromInstruction,
-  CONTEXT_SCOPE_HINT,
+  contextScopeHint,
   type InsertContext,
   type InsertResult,
 } from "@/lib/aiInsert";
 import { useIde } from "@/store";
+import { useT } from "@/lib/i18n";
 
 /** 对话框宽度与行数上限（上下文说明里展示） */
 const PREVIEW_MAX_CHARS = 90;
@@ -37,6 +38,7 @@ export interface AiInsertDialogProps {
 }
 
 export function AiInsertDialog({ ctx, file, onInsert, onClose }: AiInsertDialogProps) {
+  const tr = useT();
   const [instruction, setInstruction] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -71,8 +73,8 @@ export function AiInsertDialog({ ctx, file, onInsert, onClose }: AiInsertDialogP
     abortRef.current?.abort();
     abortRef.current = null;
     setBusy(false);
-    setError("已取消 AI 请求。");
-  }, []);
+    setError(tr("ai.error.canceled"));
+  }, [tr]);
 
   const requestClose = useCallback(() => {
     abortRef.current?.abort();
@@ -84,13 +86,13 @@ export function AiInsertDialog({ ctx, file, onInsert, onClose }: AiInsertDialogP
     if (!ctx || busy) return;
     const text = instruction.trim();
     if (!text) {
-      setError("请先输入一句指令，例如「给这个类加一个打印函数」。");
+      setError(tr("aiInsert.errEmptyInstruction"));
       inputRef.current?.focus();
       return;
     }
     const st = useIde.getState();
     if (!isAiConfigured(st.settings)) {
-      setError(aiConfigHint(st.settings) || "未配置 AI 接口。");
+      setError(aiConfigHint(st.settings) || tr("aiFix.errNotConfigured"));
       return;
     }
     const { text: context } = buildInsertContext(ctx, file);
@@ -119,7 +121,7 @@ export function AiInsertDialog({ ctx, file, onInsert, onClose }: AiInsertDialogP
       if (abortRef.current === ctrl) abortRef.current = null;
       if (!ctrl.signal.aborted) setBusy(false);
     }
-  }, [ctx, busy, instruction, file, onInsert, onClose]);
+  }, [ctx, busy, instruction, file, onInsert, onClose, tr]);
 
   // Esc 关闭（生成中先取消再关闭）；Ctrl/Cmd+Enter 直接生成
   useEffect(() => {
@@ -156,17 +158,17 @@ export function AiInsertDialog({ ctx, file, onInsert, onClose }: AiInsertDialogP
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label="AI 插入代码"
+        aria-label={tr("editor.insertCode")}
       >
         {/* 头部 */}
         <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[color:var(--ide-border)] shrink-0">
           <Sparkles size={15} className="text-[color:var(--ide-purple)] shrink-0" />
-          <span className="text-[13px] font-semibold">AI 插入代码</span>
+          <span className="text-[13px] font-semibold">{tr("editor.insertCode")}</span>
           <span className="text-[11.5px] font-mono text-[color:var(--ide-text-muted)] truncate">{file}</span>
           <button
             className="kimi-pop ml-auto p-1 rounded text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-hover)]"
             onClick={requestClose}
-            title="关闭（Esc）"
+            title={tr("aiInsert.closeTitle")}
           >
             <X size={14} />
           </button>
@@ -175,7 +177,7 @@ export function AiInsertDialog({ ctx, file, onInsert, onClose }: AiInsertDialogP
         {/* 指令输入 */}
         <div className="px-4 pt-3 pb-2">
           <label className="block text-[12px] text-[color:var(--ide-text-dim)] mb-1.5" htmlFor="ai-insert-instruction">
-            用一句自然语言描述要加的功能
+            {tr("aiInsert.instructionLabel")}
           </label>
           <textarea
             id="ai-insert-instruction"
@@ -184,7 +186,7 @@ export function AiInsertDialog({ ctx, file, onInsert, onClose }: AiInsertDialogP
             onChange={(e) => setInstruction(e.target.value)}
             rows={3}
             disabled={busy}
-            placeholder="给这个类加一个打印函数"
+            placeholder={tr("aiInsert.instructionPlaceholder")}
             className="w-full resize-none rounded-md border border-[color:var(--ide-border-strong)] bg-[color:var(--ide-bg-base)] px-2.5 py-2 text-[12.5px] leading-5 text-[color:var(--ide-text)] placeholder:text-[color:var(--ide-text-faint)] focus:outline-none focus:border-[color:var(--ide-accent)] disabled:opacity-60"
           />
         </div>
@@ -192,15 +194,13 @@ export function AiInsertDialog({ ctx, file, onInsert, onClose }: AiInsertDialogP
         {/* 上下文范围说明：自动带上当前文件 + 行数 / 截断策略 */}
         <div className="px-4 pb-2 text-[11.5px] leading-5 text-[color:var(--ide-text-muted)]">
           <div>
-            上下文：<span className="font-mono text-[color:var(--ide-text-dim)]">{file}</span>
-            {" · 插入位置：第 "}
-            {line}
-            {" 行（光标处）"}
+            {tr("aiInsert.context")}<span className="font-mono text-[color:var(--ide-text-dim)]">{file}</span>
+            {tr("aiInsert.insertAt", { line })}
           </div>
-          <div className="text-[color:var(--ide-text-faint)]">{CONTEXT_SCOPE_HINT}</div>
+          <div className="text-[color:var(--ide-text-faint)]">{contextScopeHint()}</div>
           {preview && (
             <div className="mt-0.5 truncate font-mono text-[11px] text-[color:var(--ide-text-faint)]">
-              该行：{preview}
+              {tr("aiInsert.linePreview", { preview })}
             </div>
           )}
         </div>
@@ -218,31 +218,31 @@ export function AiInsertDialog({ ctx, file, onInsert, onClose }: AiInsertDialogP
         {/* 底部动作 */}
         <div className="flex items-center gap-2 px-4 py-2.5 border-t border-[color:var(--ide-border)] shrink-0">
           <span className="text-[11.5px] text-[color:var(--ide-text-muted)] mr-auto">
-            {busy ? "请求进行中…（30 秒超时）" : "生成后插入到光标处，可一次 Ctrl+Z 撤销。"}
+            {busy ? tr("aiInsert.busyHint") : tr("aiInsert.idleHint")}
           </span>
           {busy && (
             <button
               className="px-3 py-1.5 rounded-md text-[12.5px] border border-[color:var(--ide-border-strong)] text-[color:var(--ide-text-dim)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-hover)]"
               onClick={cancel}
             >
-              取消
+              {tr("common.cancel")}
             </button>
           )}
           <button
             className="px-3 py-1.5 rounded-md text-[12.5px] border border-[color:var(--ide-border-strong)] text-[color:var(--ide-text-dim)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-hover)]"
             onClick={requestClose}
-            title={busy ? "关闭并取消正在进行的生成" : "关闭（Esc）"}
+            title={busy ? tr("aiInsert.closeBusyTitle") : tr("aiInsert.closeTitle")}
           >
-            关闭
+            {tr("common.close")}
           </button>
           <button
             className="kimi-pop flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-[12.5px] bg-[color:var(--ide-accent-strong)] hover:bg-[color:var(--ide-accent)] text-white disabled:opacity-40 disabled:cursor-not-allowed"
             onClick={() => void submit()}
             disabled={busy || !instruction.trim()}
-            title="生成并插入到光标处（Ctrl+Enter）"
+            title={tr("aiInsert.submitTitle")}
           >
             {busy ? <Loader2 size={13} className="animate-spin" /> : <CornerDownLeft size={13} />}
-            {busy ? "生成中…" : "生成并插入"}
+            {busy ? tr("aiInsert.generating") : tr("aiInsert.submit")}
           </button>
         </div>
       </div>
