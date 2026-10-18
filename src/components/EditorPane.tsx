@@ -1,6 +1,6 @@
 import { useMemo, useRef, useEffect, useCallback, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
-import { Loader2, Sparkles, TriangleAlert, Wand2, X } from "lucide-react";
+import { Loader2, Sparkles, TriangleAlert, Wand2, X, BookOpen, FileCode2 } from "lucide-react";
 import {
   EditorView,
   Decoration,
@@ -47,7 +47,6 @@ import {
   closeBrackets,
   closeBracketsKeymap,
   completionKeymap,
-  snippetCompletion,
   type Completion,
   type CompletionContext,
   type CompletionResult,
@@ -57,7 +56,7 @@ import { tags } from "@lezer/highlight";
 import { search, searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { createPortal } from "react-dom";
 import { SearchPanel } from "@/components/SearchPanel";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory } from "@codemirror/commands";
 import { useIde } from "@/store";
 import { setActiveEditor } from "@/lib/editorRegistry";
 import { aiConfigHint, isAiConfigured } from "@/lib/ai";
@@ -69,11 +68,16 @@ import {
   resolveTargetLineNumber,
   type CommentAnchor,
 } from "@/lib/aiGen";
-import { editorFlagOn, maxUndoStepsOf, themeOf, type Diagnostic, type ThemeName } from "@/types";
+import { editorFlagOn, editorFontFamilyOf, editorFontSizeOf, editorTabSizeOf, fontFamilyToCss, maxUndoStepsOf, themeOf, type Diagnostic, type ThemeName } from "@/types";
 import { captureInsertContext, insertCodeAtCursor, type InsertContext } from "@/lib/aiInsert";
 import { AiInsertDialog } from "@/components/AiInsertDialog";
+import { captureExplainContext, insertExplanationAsComment, type ExplainContext } from "@/lib/aiExplain";
+import { AiExplainDialog } from "@/components/AiExplainDialog";
 import { AiGhostController } from "@/lib/aiGhost";
 import { ghostExtensions, ghostKeymap, setGhostText } from "@/lib/aiInline";
+import { snippetCompletionOptions, snippetExtensions, snippetKeymap, tryExpandSnippet } from "@/lib/snippetEditor";
+import { api } from "@/lib/api";
+import { t, useT } from "@/lib/i18n";
 
 // ---------------------------------------------------------------------------
 // 主题与语法高亮: 不同语法元素以不同颜色区分
@@ -299,6 +303,30 @@ function themeExtension(t: ThemeName): Extension {
   return t === "light"
     ? [lightTheme, syntaxHighlighting(lightHighlight)]
     : [darkTheme, syntaxHighlighting(highlight)];
+}
+
+/**
+ * 编辑器字体 / 字号：装进 Compartment，设置变化时只 reconfigure 这一项，
+ * 不重建视图，因此文档、撤销历史、补全状态、断点装饰全部保留。
+ * 字号写 editorAttributes（内联样式，优先级高于主题里的 13.5px）；
+ * 字体族同时写 scroller / content / gutters —— 两套主题的 .cm-scroller 显式设过字体，
+ * 必须让 .cm-content / .cm-gutters 也显式覆盖，才能保证代码区字体真正生效。
+ */
+function editorFontExtension(family: string, size: number): Extension {
+  const cssFamily = fontFamilyToCss(family);
+  return [
+    EditorView.editorAttributes.of({ style: `font-size:${size}px` }),
+    EditorView.theme({
+      ".cm-scroller": { fontFamily: cssFamily },
+      ".cm-content": { fontFamily: cssFamily },
+      ".cm-gutters": { fontFamily: cssFamily },
+    }),
+  ];
+}
+
+/** Tab 宽度：tabSize 控制制表符显示宽度，indentUnit 保证回车自动缩进用同样数量的空格 */
+function editorTabExtension(size: number): Extension {
+  return [EditorState.tabSize.of(size), indentUnit.of(" ".repeat(size))];
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +594,7 @@ const debugHover = hoverTooltip(async (view, pos, side) => {
   } catch (e) {
     value = "⚠ " + (e instanceof Error ? e.message : String(e));
   }
-  if (!value) value = "(空值)";
+  if (!value) value = t("common.emptyValue");
   return {
     pos: line.from + found.from,
     end: line.from + found.to,
@@ -624,33 +652,10 @@ const HEADERS = [
   "iterator", "random", "chrono", "limits", "thread", "mutex",
 ];
 
-const SNIPPETS: Completion[] = [
-  snippetCompletion("for (int ${i} = 0; ${i} < ${n}; ${i}++) {\n\t${}\n}", {
-    label: "for", detail: "for 循环", type: "snippet", boost: 2,
-  }),
-  snippetCompletion("for (auto &${x} : ${container}) {\n\t${}\n}", {
-    label: "forr", detail: "范围 for 循环", type: "snippet", boost: 2,
-  }),
-  snippetCompletion("while (${cond}) {\n\t${}\n}", { label: "while", detail: "while 循环", type: "snippet" }),
-  snippetCompletion("if (${cond}) {\n\t${}\n}", { label: "if", detail: "if 语句", type: "snippet", boost: 2 }),
-  snippetCompletion("if (${cond}) {\n\t${}\n} else {\n\t\n}", { label: "ifelse", detail: "if-else 语句", type: "snippet" }),
-  snippetCompletion("int main() {\n\t${}\n\treturn 0;\n}", { label: "main", detail: "main 函数", type: "snippet", boost: 3 }),
-  snippetCompletion("std::cout << ${} << std::endl;", { label: "cout", detail: "输出", type: "snippet", boost: 3 }),
-  snippetCompletion("std::cin >> ${};", { label: "cin", detail: "输入", type: "snippet", boost: 3 }),
-  snippetCompletion("class ${Name} {\npublic:\n\t${Name}();\n\t~${Name}();\nprivate:\n\t\n};", {
-    label: "class", detail: "类定义", type: "snippet",
-  }),
-  snippetCompletion("switch (${x}) {\ncase ${1}:\n\t${}\n\tbreak;\ndefault:\n\tbreak;\n}", {
-    label: "switch", detail: "switch 语句", type: "snippet",
-  }),
-  snippetCompletion("try {\n\t${}\n} catch (const std::exception &e) {\n\tstd::cerr << e.what() << std::endl;\n}", {
-    label: "try", detail: "try-catch", type: "snippet",
-  }),
-  snippetCompletion("std::vector<${int}> ${v};", { label: "vector", detail: "vector 声明", type: "snippet" }),
-  snippetCompletion("#include <${}>", { label: "include", detail: "#include", type: "snippet", boost: 2 }),
-  snippetCompletion("do {\n\t${}\n} while (${cond});", { label: "do", detail: "do-while", type: "snippet" }),
-];
-
+/**
+ * 补全里的代码片段：数据与展开逻辑统一在 src/lib/snippets.ts / snippetEditor.ts。
+ * 这里只负责把它们并进本文件补全源；detail 每次请求时现取，切换语言立即生效。
+ */
 function cppCompletions(context: CompletionContext): CompletionResult | null {
   const includeMatch = context.matchBefore(/#\s*include\s*[<"][^>"]*$/);
   if (includeMatch) {
@@ -674,12 +679,13 @@ function cppCompletions(context: CompletionContext): CompletionResult | null {
   const options: Completion[] = [
     ...KEYWORDS.map((k) => ({ label: k, type: "keyword" as const })),
     ...BUILTINS,
-    ...SNIPPETS,
+    ...snippetCompletionOptions(),
     ...[...docWords].map((w) => ({ label: w, type: "text" as const })),
     // 去掉与已输入文本完全相同的「回显项」：它来自 docWords（刚打的词已在文档里），
     // 排在第一位会让 Tab/Enter 的 accept 变成肉眼不可见的空操作——用户以为「Tab 没反应」
     // 再按一次，弹窗已关闭，Tab 落回缩进（「按 Tab 在行行首缩进」的元凶之一）。
-  ].filter((o) => o.label !== word.text);
+    // 片段项例外：前缀打全（如 for）时它仍然要留在列表里，选中后展开循环骨架。
+  ].filter((o) => o.label !== word.text || o.type === "snippet");
   // 全部选项都被过滤（输入的已是完整关键字/唯一词）：没必要开弹窗
   if (options.length === 0) return null;
   return { from: word.from, options, validFor: /^\w*$/ };
@@ -801,7 +807,7 @@ const GEN_FROM_COMMENT_KEY = "Mod-Alt-g";
 /** 菜单里展示的快捷键文案（Windows 上 Mod = Ctrl） */
 const GEN_FROM_COMMENT_LABEL = "Ctrl+Alt+G";
 /** 目标行没有可用注释时的统一提示 */
-const NO_COMMENT_HINT = "当前行没有 // 注释（或注释为空），无法从注释生成代码。";
+const NO_COMMENT_HINT_KEY = "editor.noCommentHint";
 
 // ---------------------------------------------------------------------------
 // AI 插入代码：入口常量（三段核心逻辑在 src/lib/aiInsert.ts）
@@ -815,9 +821,38 @@ const AI_INSERT_KEY = "Mod-Alt-i";
 const AI_INSERT_LABEL = "Ctrl+Alt+I";
 
 // ---------------------------------------------------------------------------
+// AI 解释代码：入口常量（三段核心逻辑在 src/lib/aiExplain.ts）
+// ---------------------------------------------------------------------------
+/**
+ * 快捷键选 Ctrl+Alt+E 的原因：E 是 Explain 的首字母，且与已有的
+ * Ctrl+Alt+G（从注释生成）、Ctrl+Alt+I（AI 插入）、Ctrl+/（切换注释）均不冲突。
+ */
+const EXPLAIN_KEY = "Mod-Alt-e";
+/** 菜单里展示的快捷键文案（Windows 上 Mod = Ctrl） */
+const EXPLAIN_LABEL = "Ctrl+Alt+E";
+
+// ---------------------------------------------------------------------------
+// clang-format 一键格式化：VSCode 惯例 Shift+Alt+F（单事务替换全文，可一次撤销）
+// ---------------------------------------------------------------------------
+const FORMAT_KEY = "Shift-Alt-f";
+const FORMAT_LABEL = "Shift+Alt+F";
+
+/** 服务端 /api/format 错误码 → i18n key（未知码回落到 detail 文本） */
+const FORMAT_ERROR_KEYS: Record<string, string> = {
+  FORMAT_UNAVAILABLE: "format.errUnavailable",
+  FORMAT_TIMEOUT: "format.errTimeout",
+  FORMAT_TOO_LARGE: "format.errTooLarge",
+  FORMAT_BAD_STYLE: "format.errBadStyle",
+  FORMAT_EMPTY: "format.errEmpty",
+  FORMAT_NO_FILE: "format.errNoFile",
+  FORMAT_INVALID_PATH: "format.errPath",
+};
+
+// ---------------------------------------------------------------------------
 // 编辑器组件
 // ---------------------------------------------------------------------------
 export function EditorPane({ file }: { file: string }) {
+  const tr = useT();
   const content = useIde((s) => s.contents[file] ?? "");
   // 内容未从磁盘读入前不挂载编辑器：否则 @uiw 的 value 同步会把「整文填充」
   // 记进撤销历史，用户多按几次 Ctrl+Z 会把缓冲区撤成空文档（重做可恢复但易误保存）
@@ -830,7 +865,9 @@ export function EditorPane({ file }: { file: string }) {
   const saveFile = useIde((s) => s.saveFile);
   const reveal = useIde((s) => s.reveal);
   const clearReveal = useIde((s) => s.clearReveal);
-  const fontSize = useIde((s) => s.editorFontSize);
+  const fontSize = useIde((s) => editorFontSizeOf(s.settings));
+  const fontFamily = useIde((s) => editorFontFamilyOf(s.settings));
+  const tabSize = useIde((s) => editorTabSizeOf(s.settings));
   const setFontSize = useIde((s) => s.setEditorFontSize);
   const selMatchOn = useIde((s) => editorFlagOn(s.settings, "highlightSelectionMatches"));
   const bracketMatchOn = useIde((s) => editorFlagOn(s.settings, "highlightBracketPairs"));
@@ -845,6 +882,7 @@ export function EditorPane({ file }: { file: string }) {
   const [searchHost, setSearchHost] = useState<{ dom: HTMLElement; view: EditorView } | null>(null);
   const fontComp = useRef(new Compartment());
   const themeComp = useRef(new Compartment());
+  const tabComp = useRef(new Compartment());
 
   // -------------------------------------------------------------------------
   // 「从注释生成代码」的 UI 编排（三段核心逻辑见 src/lib/aiGen.ts）：
@@ -852,8 +890,15 @@ export function EditorPane({ file }: { file: string }) {
   //   → ③ insertGeneratedCode 插入文本（单事务，可一次撤销）
   // 这里只负责：两个入口（右键菜单 / 快捷键）、生成中状态、中文提示。
   // -------------------------------------------------------------------------
-  // 右键菜单状态：记录点击坐标、点击到的行、以及该行提取出的注释锚点（null = 该行不可用）
-  const [genMenu, setGenMenu] = useState<{ x: number; y: number; line: number; anchor: CommentAnchor | null } | null>(null);
+  // 右键菜单状态：记录点击坐标、点击到的行、该行提取出的注释锚点（null = 该行不可用）
+  // 以及右键时是否有选区（决定「AI 解释代码」是否可用）。
+  const [genMenu, setGenMenu] = useState<{
+    x: number;
+    y: number;
+    line: number;
+    anchor: CommentAnchor | null;
+    hasSelection: boolean;
+  } | null>(null);
   const [genBusy, setGenBusy] = useState(false);
   const [genNotice, setGenNotice] = useState<{ kind: "info" | "error"; text: string } | null>(null);
   const genBusyRef = useRef(false);
@@ -879,6 +924,107 @@ export function EditorPane({ file }: { file: string }) {
   // 扩展在 useMemo 里只建一次，快捷键处理器经 ref 转发以拿到每次渲染最新的 openInsertDialog
   const openInsertDialogRef = useRef(openInsertDialog);
   openInsertDialogRef.current = openInsertDialog;
+
+  // -------------------------------------------------------------------------
+  // 「AI 解释代码」的 UI 编排（核心逻辑见 src/lib/aiExplain.ts）：
+  //   ① captureExplainContext 抓选区 + 前后 30 行 → ② AiExplainDialog 里流式请求
+  //   → ③ insertExplanationAsComment 单事务把讲解作为 // 注释插到选区上方。
+  // 这里只负责：两个入口（右键菜单项 / Ctrl+Alt+E）、无选区提示、打开对话框时抓现场。
+  // -------------------------------------------------------------------------
+  const [explainCtx, setExplainCtx] = useState<ExplainContext | null>(null);
+
+  /** 打开解释对话框：无选区时只给中文提示，不发请求、不弹窗 */
+  const openExplainDialog = useCallback(() => {
+    const view = viewRef.current;
+    setGenMenu(null);
+    if (!view) return;
+    const ctx = captureExplainContext(view.state);
+    if (!ctx) {
+      setGenNotice({ kind: "error", text: t("explain.errNoSelection") });
+      return;
+    }
+    setExplainCtx(ctx);
+  }, []);
+
+  const openExplainDialogRef = useRef(openExplainDialog);
+  openExplainDialogRef.current = openExplainDialog;
+
+  // -------------------------------------------------------------------------
+  // clang-format「格式化文档」：先保存未保存修改（与 Ctrl+S 同一写入通道），
+  // 再请求 /api/format；成功后用**单个 CodeMirror 事务**替换全文，
+  // 并用 isolateHistory 把它与前后输入隔开 → Ctrl+Z 一次即可完整撤销。
+  // -------------------------------------------------------------------------
+  const [formatBusy, setFormatBusy] = useState(false);
+  const formatBusyRef = useRef(false);
+
+  const runFormat = useCallback(async () => {
+    const view = viewRef.current;
+    if (!view || formatBusyRef.current) return;
+    const before = view.state.doc.toString();
+    formatBusyRef.current = true;
+    setFormatBusy(true);
+    setGenMenu(null);
+    try {
+      // ① 有未保存修改时先落盘：只写编辑器当前内容，绝不静默丢弃
+      if (useIde.getState().dirty[file]) {
+        const saved = (await api.writeFile(file, before)) as { ok?: boolean; error?: string };
+        if (saved.error) {
+          setGenNotice({ kind: "error", text: tr("format.errSave", { detail: saved.error }) });
+          return;
+        }
+        // 保存期间用户继续输入 → 不清理脏标记，也不应用格式化结果
+        if (viewRef.current !== view || view.state.doc.toString() !== before) {
+          setGenNotice({ kind: "error", text: tr("format.errStale") });
+          return;
+        }
+        useIde.setState((s) => ({ dirty: { ...s.dirty, [file]: false } }));
+      }
+
+      // ② 服务端只读工作区文件并返回格式化全文（不写盘）
+      const r = await api.formatFile(file);
+      if (r.error) {
+        const key = r.code ? FORMAT_ERROR_KEYS[r.code] : "";
+        setGenNotice({
+          kind: "error",
+          text: key ? tr(key) : tr("format.errFailed", { detail: r.error }),
+        });
+        return;
+      }
+      const formatted = r.content ?? "";
+      if (!formatted) {
+        setGenNotice({ kind: "error", text: tr("format.errEmpty") });
+        return;
+      }
+      if (viewRef.current !== view) return;
+      const current = view.state.doc.toString();
+      if (current !== before) {
+        // 格式化期间文档被改：放弃结果，避免覆盖用户新输入
+        setGenNotice({ kind: "error", text: tr("format.errStale") });
+        return;
+      }
+      if (formatted === current) {
+        setGenNotice({ kind: "info", text: tr("format.unchanged") });
+        return;
+      }
+      // ③ 单事务替换全文 + 与前后历史隔离（一次 Ctrl+Z 回到格式化前）
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: formatted },
+        annotations: [isolateHistory.of("full")],
+      });
+      view.focus();
+      setGenNotice({ kind: "info", text: tr("format.done") });
+    } catch (e) {
+      setGenNotice({
+        kind: "error",
+        text: tr("format.errFailed", { detail: e instanceof Error ? e.message : String(e) }),
+      });
+    } finally {
+      formatBusyRef.current = false;
+      setFormatBusy(false);
+    }
+  }, [file, tr]);
+  const runFormatRef = useRef(runFormat);
+  runFormatRef.current = runFormat;
 
   // 提示条自动消失（错误留更久，便于阅读）
   useEffect(() => {
@@ -920,13 +1066,13 @@ export function EditorPane({ file }: { file: string }) {
       // ① 提取注释：非注释行 / 空注释（`//`）一律不触发
       const anchor = extractCommentAtLine(view.state, lineNumber);
       if (!anchor) {
-        setGenNotice({ kind: "error", text: NO_COMMENT_HINT });
+        setGenNotice({ kind: "error", text: t(NO_COMMENT_HINT_KEY) });
         return;
       }
       // 健壮性：AI 未配置时给中文提示，不发请求、不改文档
       const st = useIde.getState();
       if (!isAiConfigured(st.settings)) {
-        setGenNotice({ kind: "error", text: aiConfigHint(st.settings) || "未配置 AI 接口。" });
+        setGenNotice({ kind: "error", text: aiConfigHint(st.settings) || t("editor.notConfigured") });
         return;
       }
       const context = buildContextSnippet(view.state, anchor);
@@ -950,7 +1096,7 @@ export function EditorPane({ file }: { file: string }) {
         const inserted = insertGeneratedCode(view, anchor, res.code);
         setGenNotice(
           inserted.ok
-            ? { kind: "info", text: `已从注释插入 ${inserted.lineCount} 行代码（Ctrl+Z 可一次撤销）。` }
+            ? { kind: "info", text: t("editor.inserted", { count: inserted.lineCount }) }
             : { kind: "error", text: inserted.error }
         );
       } finally {
@@ -1044,59 +1190,77 @@ export function EditorPane({ file }: { file: string }) {
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, []);
 
-  /** 打开自定义右键菜单，并把坐标夹到视口内（避免菜单被裁掉；按「两项 + 一行提示」估高 132px） */
-  const openGenMenu = useCallback((x: number, y: number, line: number, anchor: CommentAnchor | null) => {
-    setGenMenu({
-      x: Math.min(x, Math.max(0, window.innerWidth - 240)),
-      y: Math.min(y, Math.max(0, window.innerHeight - 132)),
-      line,
-      anchor,
-    });
-  }, []);
+  /** 打开自定义右键菜单，并把坐标夹到视口内（避免菜单被裁掉；按「四项 + 一行提示」估高 220px） */
+  const openGenMenu = useCallback(
+    (x: number, y: number, line: number, anchor: CommentAnchor | null, hasSelection: boolean) => {
+      setGenMenu({
+        x: Math.min(x, Math.max(0, window.innerWidth - 240)),
+        y: Math.min(y, Math.max(0, window.innerHeight - 220)),
+        line,
+        anchor,
+        hasSelection,
+      });
+    },
+    []
+  );
 
   /**
-   * 入口 a：编辑器右键菜单 —— 拦截 CM 默认菜单，记录点击行并弹出两项：
-   * 「从注释生成代码」（需该行有 // 注释）与「AI 插入代码…」（任意位置可用）。
-   * 顺手把光标移到右键点击处：这样两个入口的目标位置一致，「AI 插入代码」的插入点
-   * 也就是用户点的那一行，而不是移开菜单前的旧光标位置。
+   * 入口 a：编辑器右键菜单 —— 拦截 CM 默认菜单，记录点击行并弹出四项：
+   * 「格式化文档」（clang-format）、「从注释生成代码」（需该行有 // 注释）、
+   * 「AI 解释代码」（需有选区）与「AI 插入代码…」（任意位置可用）。
+   * 光标处理：点在**已有选区内**时保留选区（否则「AI 解释代码」右键就会把选区弄丢），
+   * 点在选区外才把光标移到点击处——这样「AI 插入代码」的插入点仍是用户点的那一行。
    */
   const genContextMenuExt = useMemo(
     () =>
       EditorView.domEventHandlers({
         contextmenu: (event, view) => {
           event.preventDefault();
-          const pos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.from;
+          const sel = view.state.selection.main;
+          const pos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? sel.from;
           const line = view.state.doc.lineAt(pos).number;
-          if (!view.state.selection.main.empty || view.state.selection.main.head !== pos) {
+          const insideSelection = !sel.empty && pos >= sel.from && pos <= sel.to;
+          if (!insideSelection && (!sel.empty || sel.head !== pos)) {
             view.dispatch({ selection: { anchor: pos } });
           }
-          openGenMenu(event.clientX, event.clientY, line, extractCommentAtLine(view.state, line));
+          openGenMenu(
+            event.clientX,
+            event.clientY,
+            line,
+            extractCommentAtLine(view.state, line),
+            !view.state.selection.main.empty
+          );
           return true;
         },
       }),
     [openGenMenu]
   );
 
-  // Ctrl+滚轮缩放字号（全局共享，持久化到 localStorage）
+  // Ctrl+滚轮缩放字号（写入 settings.editorFontSize，与设置对话框共用同一份值）
   const zoomByWheel = useCallback(
     (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
-      setFontSize(useIde.getState().editorFontSize + (e.deltaY < 0 ? 1 : -1));
+      setFontSize(editorFontSizeOf(useIde.getState().settings) + (e.deltaY < 0 ? 1 : -1));
     },
     [setFontSize]
   );
 
-  // 字号通过 compartment 热更新（避免重建全部扩展）
+  // 字体 / 字号通过同一个 compartment 热更新（避免重建全部扩展）
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: fontComp.current.reconfigure(
-        EditorView.editorAttributes.of({ style: `font-size:${fontSize}px` })
-      ),
+      effects: fontComp.current.reconfigure(editorFontExtension(fontFamily, fontSize)),
     });
-  }, [fontSize]);
+  }, [fontFamily, fontSize]);
+
+  // Tab 宽度热更新：只换 tabSize + indentUnit，不重建视图
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: tabComp.current.reconfigure(editorTabExtension(tabSize)) });
+  }, [tabSize]);
 
   // 亮/暗主题热切换：只 reconfigure themeComp（外观 + 语法高亮一起换），
   // 不重建其它扩展，因此文档、撤销历史、补全状态、断点装饰全部保留，也无需刷新页面。
@@ -1194,17 +1358,13 @@ export function EditorPane({ file }: { file: string }) {
       rectangularSelection(),
       crosshairCursor(),
       EditorState.allowMultipleSelections.of(true),
-      fontComp.current.of(
-        EditorView.editorAttributes.of({ style: `font-size:${fontSize}px` })
-      ),
+      fontComp.current.of(editorFontExtension(fontFamily, fontSize)),
       StreamLanguage.define(cpp),
       // 撤销历史：minDepth 即「最多保留的事件数」（CM 源码 updateBranch 的超参叫 maxLen），
       // 超出后丢弃最旧的事件；用 Compartment 包起来让步数可调
       HISTORY_COMP.of(history({ minDepth: maxUndoSteps })),
-      EditorState.tabSize.of(4),
-      // indentUnit 默认是 2 空格：C++ 回车自动缩进只给 2 格，与项目 4 空格
-      // 风格（及 AI 补全提示词）不一致，会导致幽灵首行缩进和后续行错位
-      indentUnit.of("    "),
+      // Tab 宽度与自动缩进宽度（设置里可调，Compartment 热更新）
+      tabComp.current.of(editorTabExtension(tabSize)),
       indentOnInput(),
       BRACKET_COMP.of(bracketMatchOn ? BRACKET_ON : BRACKET_OFF),
       closeBrackets(),
@@ -1233,9 +1393,20 @@ export function EditorPane({ file }: { file: string }) {
       // AI 内联补全：幽灵文本装饰 + Tab/Esc 拦截 + 文档/选区变化监听
       ...ghostExtensions,
       ghostKeymap,
+      // 代码片段：占位序列状态 + 主题色描边 + 激活时 Tab/Esc 优先消费
+      ...snippetExtensions,
+      snippetKeymap,
       ghostListener,
       Prec.highest(
         keymap.of([
+          {
+            // VSCode 惯例：Shift+Alt+F 格式化当前文档（clang-format）
+            key: FORMAT_KEY,
+            run: () => {
+              void runFormatRef.current();
+              return true;
+            },
+          },
           {
             key: "Mod-s",
             run: () => {
@@ -1249,7 +1420,7 @@ export function EditorPane({ file }: { file: string }) {
             run: (view) => {
               const line = resolveTargetLineNumber(view.state);
               if (!extractCommentAtLine(view.state, line)) {
-                setGenNotice({ kind: "error", text: NO_COMMENT_HINT });
+                setGenNotice({ kind: "error", text: t(NO_COMMENT_HINT_KEY) });
                 return true;
               }
               void genRef.current(view, line);
@@ -1265,16 +1436,25 @@ export function EditorPane({ file }: { file: string }) {
               return true;
             },
           },
+          {
+            // 入口 b3：快捷键「AI 解释代码」——有选区才打开；无选区由 openExplainDialog 给提示
+            key: EXPLAIN_KEY,
+            run: () => {
+              openExplainDialogRef.current();
+              return true;
+            },
+          },
         ])
       ),
-      // 补全弹窗键位必须在 indentWithTab 之前：下拉开着时 Tab 接受选中项，
-      // 没开时 acceptCompletion 返回 false 原样放行，落回缩进（修「单词补全按 Tab 变缩进」）。
+      // 补全弹窗键位必须在 indentWithTab 之前：下拉开着时 Tab 接受选中项；
+      // 没开时 acceptCompletion 返回 false，接着尝试片段展开；片段也不匹配才落回缩进。
       // 注意：本版 @codemirror/autocomplete 的 completionKeymap 只绑到 Enter（无 Tab），
-      // Tab→acceptCompletion 必须显式绑定；snippet 激活时 acceptCompletion 返回 false，
-      // 会落到 snippet 自带的 Tab（占位符跳转），互不干扰。
-      // 幽灵文本存在时仍由 Prec.highest 的 ghostKeymap 先消费（内联建议 > 下拉 > 缩进）。
+      // Tab→acceptCompletion 必须显式绑定；片段项用自定义 apply 展开，不依赖内置 snippet 状态。
+      // 完整优先级链：AI 幽灵文本（ghostKeymap，Prec.highest）> 补全下拉 > 片段展开 > 缩进。
+      // 片段占位序列激活时由 snippetKeymap（Prec.highest）先把 Tab 消费为「跳下一个占位」。
       keymap.of([
         { key: "Tab", run: acceptCompletion },
+        { key: "Tab", run: tryExpandSnippet },
         ...closeBracketsKeymap,
         ...completionKeymap,
         ...defaultKeymap,
@@ -1308,8 +1488,8 @@ export function EditorPane({ file }: { file: string }) {
       themeComp.current.of(themeExtension(theme)),
     ];
   }, [breakpoints, onToggle, fileProblems, cmDiagKey(fileProblems), file, saveFile, genContextMenuExt, ghostListener]);
-  // 注：fontSize / selMatchOn / bracketMatchOn / ghostEnabled / theme 故意不放进依赖：
-  // 它们都由上面的 compartment / effect 热更新，重建全部扩展反而会丢失插件状态。
+  // 注：fontSize / fontFamily / tabSize / selMatchOn / bracketMatchOn / ghostEnabled / theme
+  // 故意不放进依赖：它们都由上面的 compartment / effect 热更新，重建全部扩展反而会丢失插件状态。
 
   // 右键菜单项点击：先关菜单，再走同一条生成流程（锚点已在右键时提取好）
   const runFromGenMenu = () => {
@@ -1368,7 +1548,7 @@ export function EditorPane({ file }: { file: string }) {
       />
       ) : (
         <div className="h-full flex items-center justify-center text-[13px] text-[color:var(--ide-text-faint)]">
-          载入文件中…
+          {tr("common.loading")}
         </div>
       )}
 
@@ -1379,20 +1559,42 @@ export function EditorPane({ file }: { file: string }) {
       {genMenu && (
         <div
           role="menu"
-          aria-label="编辑器右键菜单"
+          aria-label={tr("editor.contextMenu")}
           className="kimi-menu-in fixed z-50 min-w-[208px] py-1 rounded-md border border-[color:var(--ide-border-strong)] bg-[color:var(--ide-bg-panel)] text-[color:var(--ide-text)] shadow-2xl"
           style={{ left: genMenu.x, top: genMenu.y }}
           onMouseDown={(e) => e.stopPropagation()} // 别让 document 上的关闭监听吃掉这次点击
           onContextMenu={(e) => e.preventDefault()}
         >
+          {/* clang-format：任何时候可用；格式化前自动保存未保存修改 */}
+          <button
+            role="menuitem"
+            onClick={() => void runFormat()}
+            disabled={formatBusy}
+            title={tr("format.menuTitle")}
+            className={`kimi-tab w-full flex items-center gap-2 px-3 py-[6px] text-[12.5px] text-left ${
+              formatBusy
+                ? "text-[color:var(--ide-text-faint)] cursor-not-allowed"
+                : "text-[color:var(--ide-text-dim)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-selected)]"
+            }`}
+          >
+            {formatBusy ? (
+              <Loader2 size={13} className="shrink-0 animate-spin text-[color:var(--ide-accent)]" />
+            ) : (
+              <FileCode2 size={13} className="shrink-0 text-[color:var(--ide-accent)]" />
+            )}
+            {formatBusy ? tr("format.busy") : tr("format.menu")}
+            <span className="ml-auto pl-3 text-[11px] font-mono text-[color:var(--ide-text-faint)]">
+              {FORMAT_LABEL}
+            </span>
+          </button>
           <button
             role="menuitem"
             onClick={runFromGenMenu}
             disabled={!genMenu.anchor || genBusy}
             title={
               genMenu.anchor
-                ? `根据第 ${genMenu.line} 行的注释「${genMenu.anchor.comment}」生成代码并插入到该行之后`
-                : NO_COMMENT_HINT
+                ? tr("editor.genFromCommentTitle", { line: genMenu.line, comment: genMenu.anchor.comment })
+                : tr(NO_COMMENT_HINT_KEY)
             }
             className={`kimi-tab w-full flex items-center gap-2 px-3 py-[6px] text-[12.5px] text-left ${
               !genMenu.anchor || genBusy
@@ -1401,26 +1603,44 @@ export function EditorPane({ file }: { file: string }) {
             }`}
           >
             <Sparkles size={13} className="shrink-0 text-[color:var(--ide-purple-bright)]" />
-            从注释生成代码
+            {tr("editor.genFromComment")}
             <span className="ml-auto pl-3 text-[11px] font-mono text-[color:var(--ide-text-faint)]">
               {GEN_FROM_COMMENT_LABEL}
             </span>
           </button>
-          {/* 入口 a2：AI 插入代码（自然语言加功能）——任何时候都可用，光标位置即插入点 */}
+          {/* 入口 a2：AI 解释代码——需要选区；无选区时禁用并给 title 提示 */}
+          <button
+            role="menuitem"
+            onClick={openExplainDialog}
+            disabled={!genMenu.hasSelection}
+            title={genMenu.hasSelection ? tr("editor.explainCodeTitle") : tr("editor.explainNoSelection")}
+            className={`kimi-tab w-full flex items-center gap-2 px-3 py-[6px] text-[12.5px] text-left ${
+              !genMenu.hasSelection
+                ? "text-[color:var(--ide-text-faint)] cursor-not-allowed"
+                : "text-[color:var(--ide-text-dim)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-selected)]"
+            }`}
+          >
+            <BookOpen size={13} className="shrink-0 text-[color:var(--ide-purple-bright)]" />
+            {tr("editor.explainCode")}
+            <span className="ml-auto pl-3 text-[11px] font-mono text-[color:var(--ide-text-faint)]">
+              {EXPLAIN_LABEL}
+            </span>
+          </button>
+          {/* 入口 a3：AI 插入代码（自然语言加功能）——任何时候都可用，光标位置即插入点 */}
           <button
             role="menuitem"
             onClick={openInsertDialog}
-            title="用一句自然语言描述要加的功能（如「给这个类加一个打印函数」），生成后插入到光标处"
+            title={tr("editor.insertCodeTitle")}
             className="kimi-tab w-full flex items-center gap-2 px-3 py-[6px] text-[12.5px] text-left text-[color:var(--ide-text-dim)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-selected)]"
           >
             <Wand2 size={13} className="shrink-0 text-[color:var(--ide-purple-bright)]" />
-            AI 插入代码…
+            {tr("editor.insertCode")}
             <span className="ml-auto pl-3 text-[11px] font-mono text-[color:var(--ide-text-faint)]">
               {AI_INSERT_LABEL}
             </span>
           </button>
           <div className="px-3 pt-1 pb-[2px] text-[11px] leading-4 text-[color:var(--ide-text-faint)]">
-            {genMenu.anchor ? `第 ${genMenu.line} 行：// ${genMenu.anchor.comment}` : "当前行没有 // 注释"}
+            {genMenu.anchor ? tr("editor.lineComment", { line: genMenu.line, comment: genMenu.anchor.comment }) : tr("editor.noCommentShort")}
           </div>
         </div>
       )}
@@ -1429,7 +1649,7 @@ export function EditorPane({ file }: { file: string }) {
       {genBusy && (
         <div className="kimi-bubble-in pointer-events-none absolute top-2 right-4 z-20 flex items-center gap-2 px-3 py-1.5 rounded-md border border-[color:var(--ide-border-strong)] bg-[color:var(--ide-bg-panel)] text-[12px] text-[color:var(--ide-text-dim)] shadow-lg">
           <Loader2 size={13} className="animate-spin text-[color:var(--ide-purple-bright)]" />
-          正在根据注释生成代码…（30 秒超时）
+          {tr("editor.generating")}
         </div>
       )}
 
@@ -1451,7 +1671,7 @@ export function EditorPane({ file }: { file: string }) {
           <span className="whitespace-pre-wrap break-words">{genNotice.text}</span>
           <button
             className="kimi-pop ml-1 mt-[1px] shrink-0 p-[2px] rounded text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text)]"
-            title="关闭提示"
+            title={tr("editor.closeNotice")}
             onClick={() => setGenNotice(null)}
           >
             <X size={12} />
@@ -1465,6 +1685,22 @@ export function EditorPane({ file }: { file: string }) {
         file={file}
         onInsert={(ctx, code) => insertCodeAtCursor(viewRef.current!, ctx, code)}
         onClose={() => setInsertCtx(null)}
+      />
+
+      {/* 「AI 解释代码」对话框：打开即流式请求，解释完成后可插入为 // 注释（单事务可撤销） */}
+      <AiExplainDialog
+        ctx={explainCtx}
+        file={file}
+        onInsert={(ctx, markdown) => {
+          const view = viewRef.current;
+          if (!view) return { ok: false as const, error: tr("explain.errDocChanged") };
+          const res = insertExplanationAsComment(view, ctx, markdown);
+          if (res.ok) {
+            setGenNotice({ kind: "info", text: tr("explain.inserted", { count: res.lineCount }) });
+          }
+          return res;
+        }}
+        onClose={() => setExplainCtx(null)}
       />
     </div>
   );
