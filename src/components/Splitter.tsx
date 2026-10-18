@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
+import { useT } from "@/lib/i18n";
 
 /**
  * 可复用的拖拽分隔条（基于 Pointer Events，不使用 mouse 事件）。
@@ -53,6 +54,7 @@ export function Splitter({
   title,
   label,
 }: SplitterProps) {
+  const t = useT();
   const vertical = orientation === "vertical";
   const [dragging, setDragging] = useState(false);
   // 一次拖动会话：记录指针起点与「拖动开始时的尺寸」。
@@ -117,7 +119,7 @@ export function Splitter({
     <div
       role="separator"
       aria-orientation={vertical ? "vertical" : "horizontal"}
-      aria-label={label ?? (vertical ? "拖动调节左右宽度" : "拖动调节上下高度")}
+      aria-label={label ?? (vertical ? t("splitter.verticalLabel") : t("splitter.horizontalLabel"))}
       tabIndex={0}
       title={title}
       onPointerDown={onPointerDown}
