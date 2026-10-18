@@ -19,6 +19,7 @@
 import { api } from "@/lib/api";
 import { AI_FIX_TIMEOUT_MS, aiConfigHint, isAiConfigured, requestChat, clipBytes, type ChatMessage } from "@/lib/ai";
 import { useIde } from "@/store";
+import { t } from "@/lib/i18n";
 import type { AiFixFile, AiFixState, Diagnostic } from "@/types";
 
 /** 一次最多发给 AI 的源文件个数 */
@@ -89,12 +90,12 @@ async function collectFiles(errors: Diagnostic[]): Promise<{ files: ContextFile[
     if (!SOURCE_RE.test(path)) continue;
     const content = await readSource(path);
     if (!content) {
-      skipped.push(`${path}（读取失败或为空）`);
+      skipped.push(t("aiFix.skippedRead", { path }));
       continue;
     }
     const bytes = new TextEncoder().encode(content).length;
     if (bytes > AI_FIX_FILE_BYTES) {
-      skipped.push(`${path}（${(bytes / 1024).toFixed(1)}KB，超过单文件上限 ${AI_FIX_FILE_BYTES / 1024}KB）`);
+      skipped.push(t("aiFix.skippedLarge", { path, size: (bytes / 1024).toFixed(1), limit: AI_FIX_FILE_BYTES / 1024 }));
       continue;
     }
     files.push({ path, content });
@@ -106,7 +107,7 @@ async function buildContext(): Promise<{ ok: true; ctx: FixContext } | { ok: fal
   const st = useIde.getState();
   const errors = st.problems.filter((d) => d.severity === "error");
   if (errors.length === 0) {
-    return { ok: false, error: "当前没有编译错误，无需修复。先编译一次（工具栏「编译」或 Ctrl+B）再试。" };
+    return { ok: false, error: t("aiFix.errNoCompile") };
   }
   // 原始报错文本：compile() 里保存的编译器输出；若为空则退化为结构化错误文本
   const rawAll = st.compileOutput || errors.map((d) => d.raw).join("\n");
@@ -115,24 +116,24 @@ async function buildContext(): Promise<{ ok: true; ctx: FixContext } | { ok: fal
     return {
       ok: false,
       error:
-        "没有可发送给 AI 的源文件" +
-        (skipped.length ? `：\n· ${skipped.join("\n· ")}\n可以先把代码拆小一些，或手动把出错的文件截短后再试。` : "（请先在工作区打开一个 .c/.cpp/.h 源文件）"),
+        t("aiFix.errNoFiles") +
+        (skipped.length ? t("aiFix.errNoFilesDetail", { files: skipped.join("\n· ") }) : t("aiFix.errNoFilesHint")),
     };
   }
   const shown = errors.slice(0, AI_FIX_MAX_ERRORS);
   const more = errors.length - shown.length;
   const lines = shown.map((d) => {
-    const loc = d.file ? `${d.file}:${d.line}:${d.col}` : "（链接阶段）";
-    return `${loc} [${d.severity}] ${d.message}${d.hint ? `\n    ↳ 可能原因：${d.hint}` : ""}`;
+    const loc = d.file ? `${d.file}:${d.line}:${d.col}` : t("aiFix.linkStage");
+    return `${loc} [${d.severity}] ${d.message}${d.hint ? t("aiFix.errorHint", { hint: d.hint }) : ""}`;
   });
-  if (more > 0) lines.push(`…（其余 ${more} 条错误已省略）`);
+  if (more > 0) lines.push(t("aiFix.moreErrors", { count: more }));
   return {
     ok: true,
     ctx: {
-      rawOutput: clipBytes(rawAll.trim(), AI_FIX_ERROR_BYTES, 0.7, "编译器输出过长"),
+      rawOutput: clipBytes(rawAll.trim(), AI_FIX_ERROR_BYTES, 0.7, t("aiFix.clipNote")),
       errorList: lines.join("\n"),
       files,
-      skipped: skipped.length ? `为控制 token 量已跳过：${skipped.join("；")}` : "",
+      skipped: skipped.length ? t("aiFix.noteSkipped", { files: skipped.join("；") }) : "",
     },
   };
 }
@@ -206,11 +207,11 @@ export function parseFixReply(
   allowedPaths: string[]
 ): { ok: true; files: { path: string; content: string }[]; note: string } | { ok: false; error: string } {
   const norm = (text || "").replace(/\r\n?/g, "\n");
-  if (!norm.trim()) return { ok: false, error: "AI 返回了空内容。" };
+  if (!norm.trim()) return { ok: false, error: t("aiFix.empty") };
   const noneIdx = norm.indexOf(FIX_NONE);
   if (noneIdx >= 0) {
     const reason = norm.slice(noneIdx + FIX_NONE.length).trim().slice(0, 300);
-    return { ok: false, error: `AI 认为无法据现有信息修复：${reason || "未给出原因"}` };
+    return { ok: false, error: t("aiFix.refused", { reason: reason || t("aiFix.refusedNoReason") }) };
   }
 
   const lines = norm.split("\n");
@@ -239,7 +240,7 @@ export function parseFixReply(
   for (const b of blocks) {
     const path = resolvePath(normalizePath(b.path), allowedPaths);
     if (!path) {
-      unknown.push(b.path || "(空路径)");
+      unknown.push(b.path || t("aiFix.emptyPath"));
       continue;
     }
     const content = stripFence(b.lines).join("\n");
@@ -256,7 +257,7 @@ export function parseFixReply(
       return {
         ok: true,
         files: [{ path: allowedPaths[0], content }],
-        note: `AI 未按标记格式返回，已按「整份回复 = ${allowedPaths[0]} 的新内容」处理，请仔细核对预览。`,
+        note: t("aiFix.noteUnmarked", { path: allowedPaths[0] }),
       };
     }
   }
@@ -265,11 +266,11 @@ export function parseFixReply(
     return {
       ok: false,
       error: unknown.length
-        ? `AI 返回的文件路径不在本次上下文中，已拒绝应用：${unknown.join("、")}`
-        : "AI 返回的内容里找不到修复标记（===KIMI-FIX-FILE: …===），无法解析。可以重试一次，或在「AI 助手」里让它直接给出完整文件。",
+        ? t("aiFix.errUnknownPaths", { paths: unknown.join("、") })
+        : t("aiFix.errNoMarkers"),
     };
   }
-  return { ok: true, files, note: unknown.length ? `已忽略路径不匹配的内容：${unknown.join("、")}` : "" };
+  return { ok: true, files, note: unknown.length ? t("aiFix.noteIgnoredPaths", { paths: unknown.join("、") }) : "" };
 }
 
 /** 把模型给的路径匹配回工作区相对路径（大小写不敏感、允许绝对路径按后缀匹配） */
@@ -289,7 +290,7 @@ function resolvePath(raw: string, allowedPaths: string[]): string | null {
 export async function runAiFix(): Promise<void> {
   const st = useIde.getState();
   if (!isAiConfigured(st.settings)) {
-    setAiFix({ status: "error", error: aiConfigHint(st.settings) || "未配置 AI 接口。", note: "", files: [], active: 0 });
+    setAiFix({ status: "error", error: aiConfigHint(st.settings) || t("aiFix.errNotConfigured"), note: "", files: [], active: 0 });
     return;
   }
   setAiFix({ status: "loading", error: "", note: "", files: [], active: 0 });
@@ -324,7 +325,7 @@ export async function runAiFix(): Promise<void> {
     if (files.length === 0) {
       setAiFix({
         status: "error",
-        error: "AI 返回的内容与当前文件完全一致，没有可应用的修改。可以补充更多上下文后重试。",
+        error: t("aiFix.errNoChanges"),
         note: [ctx.skipped, parsed.note].filter(Boolean).join("\n"),
       });
       return;
@@ -340,7 +341,7 @@ export async function runAiFix(): Promise<void> {
   } catch (e) {
     setAiFix({
       status: "error",
-      error: `AI 修复失败：${e instanceof Error ? e.message : String(e)}`,
+      error: t("aiFix.errFailed", { message: e instanceof Error ? e.message : String(e) }),
     });
   }
 }
