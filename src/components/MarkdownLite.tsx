@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
+import { useT } from "@/lib/i18n";
 
 // ---------------------------------------------------------------------------
 // 轻量 Markdown 渲染： fenced code / 标题 / 列表 / 引用 / 段落 + 行内 code/bold/italic
@@ -42,6 +43,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
 }
 
 function CodeBlock({ lang, code }: { lang: string; code: string }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
@@ -59,10 +61,10 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
         <button
           onClick={() => void copy()}
           className="flex items-center gap-1 hover:text-[color:var(--ide-text)] transition-colors"
-          title="复制代码"
+          title={t("markdown.copyCode")}
         >
           {copied ? <Check size={11} className="text-[color:var(--ide-success)]" /> : <Copy size={11} />}
-          {copied ? "已复制" : "复制"}
+          {copied ? t("markdown.copied") : t("markdown.copy")}
         </button>
       </div>
       <pre className="px-3 py-2 overflow-x-auto bg-[color:var(--ide-bg-base)] text-[12px] leading-[1.55] font-mono text-[color:var(--ide-text)] m-0">
