@@ -18,6 +18,7 @@ import {
   PackagePlus,
 } from "lucide-react";
 import { useIde } from "@/store";
+import { useT } from "@/lib/i18n";
 import { OpenDirDialog } from "@/components/OpenDirDialog";
 import type { FileNode } from "@/types";
 
@@ -36,6 +37,7 @@ interface CtxMenu {
 }
 
 function ContextMenu({ ctx, onClose, onOpenDir }: { ctx: CtxMenu; onClose: () => void; onOpenDir: () => void }) {
+  const t = useT();
   const openNameDialog = useIde((s) => s.openNameDialog);
   const newFile = useIde((s) => s.newFile);
   const removeFile = useIde((s) => s.removeFile);
@@ -61,7 +63,7 @@ function ContextMenu({ ctx, onClose, onOpenDir }: { ctx: CtxMenu; onClose: () =>
   const create = (label: string, initial: string) =>
     openNameDialog({
       title: label,
-      placeholder: "文件名（可包含目录，如 src/util.h）",
+      placeholder: t("fileTree.fileNamePlaceholder"),
       initial,
       onSubmit: (name) => {
         void newFile(joinPath(dir, name)).then((err) => err && window.alert(err));
@@ -100,19 +102,19 @@ function ContextMenu({ ctx, onClose, onOpenDir }: { ctx: CtxMenu; onClose: () =>
       style={{ left: x, top: y }}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {isFile && item(<FileCode size={13} />, "打开", () => void openFile(ctx.node!.path))}
+      {isFile && item(<FileCode size={13} />, t("fileTree.open"), () => void openFile(ctx.node!.path))}
       {isFile && sep}
-      {!ctx.node && item(<FolderOpen size={13} className="text-[color:var(--ide-warning)]" />, "打开其它目录…", onOpenDir)}
+      {!ctx.node && item(<FolderOpen size={13} className="text-[color:var(--ide-warning)]" />, t("fileTree.openOtherDir"), onOpenDir)}
       {!ctx.node && sep}
-      {item(<Braces size={13} className="text-[color:var(--ide-accent)]" />, "新建 C++ 源文件", () => create("新建 C++ 源文件", "untitled.cpp"))}
-      {item(<Cog size={13} className="text-[color:var(--ide-warning)]" />, "新建 C 源文件", () => create("新建 C 源文件", "untitled.c"))}
-      {item(<Boxes size={13} className="text-[color:var(--ide-cyan)]" />, "新建头文件", () => create("新建头文件", "untitled.h"))}
-      {item(<FileText size={13} className="text-[color:var(--ide-success)]" />, "新建文本文件", () => create("新建文本文件", "untitled.txt"))}
-      {item(<FilePlus2 size={13} />, "新建文件…", () => create("新建文件…", ""))}
-      {item(<FolderPlus size={13} />, "新建文件夹", () =>
+      {item(<Braces size={13} className="text-[color:var(--ide-accent)]" />, t("fileTree.newCpp"), () => create(t("fileTree.newCpp"), "untitled.cpp"))}
+      {item(<Cog size={13} className="text-[color:var(--ide-warning)]" />, t("fileTree.newC"), () => create(t("fileTree.newC"), "untitled.c"))}
+      {item(<Boxes size={13} className="text-[color:var(--ide-cyan)]" />, t("fileTree.newHeader"), () => create(t("fileTree.newHeader"), "untitled.h"))}
+      {item(<FileText size={13} className="text-[color:var(--ide-success)]" />, t("fileTree.newText"), () => create(t("fileTree.newText"), "untitled.txt"))}
+      {item(<FilePlus2 size={13} />, t("fileTree.newFile"), () => create(t("fileTree.newFile"), ""))}
+      {item(<FolderPlus size={13} />, t("fileTree.newFolder"), () =>
         openNameDialog({
-          title: "新建文件夹",
-          placeholder: "文件夹名",
+          title: t("fileTree.newFolder"),
+          placeholder: t("fileTree.folderName"),
           initial: "newfolder",
           onSubmit: (name) => {
             void newFile(joinPath(dir, name), true).then((err) => err && window.alert(err));
@@ -121,20 +123,20 @@ function ContextMenu({ ctx, onClose, onOpenDir }: { ctx: CtxMenu; onClose: () =>
       )}
       {ctx.node && sep}
       {ctx.node &&
-        item(<Pencil size={13} />, "重命名", () =>
+        item(<Pencil size={13} />, t("common.rename"), () =>
           openNameDialog({
-            title: `重命名「${ctx.node!.name}」`,
+            title: t("fileTree.renameTitle", { name: ctx.node!.name }),
             initial: ctx.node!.name,
             onSubmit: (name) => void rename(ctx.node!.path, joinPath(parentOf(ctx.node!.path), name)),
           })
         )}
       {ctx.node &&
-        item(<Copy size={13} />, "复制相对路径", () => {
+        item(<Copy size={13} />, t("fileTree.copyPath"), () => {
           void navigator.clipboard?.writeText(ctx.node!.path);
         })}
       {ctx.node &&
-        item(<Trash2 size={13} />, "删除", () => {
-          if (window.confirm(`确定删除「${ctx.node!.name}」吗？${ctx.node!.type === "dir" ? "（整个目录都会被删除）" : ""}`)) {
+        item(<Trash2 size={13} />, t("common.delete"), () => {
+          if (window.confirm(t("fileTree.deleteConfirm", { name: ctx.node!.name, note: ctx.node!.type === "dir" ? t("fileTree.dirDeleteNote") : "" }))) {
             void removeFile(ctx.node!.path);
           }
         }, true)}
@@ -143,6 +145,7 @@ function ContextMenu({ ctx, onClose, onOpenDir }: { ctx: CtxMenu; onClose: () =>
 }
 
 function TreeNode({ node, depth, onCtx }: { node: FileNode; depth: number; onCtx: (e: React.MouseEvent, node: FileNode) => void }) {
+  const t = useT();
   const [expanded, setExpanded] = useState(depth < 1);
   const openFile = useIde((s) => s.openFile);
   const activeFile = useIde((s) => s.activeFile);
@@ -172,7 +175,7 @@ function TreeNode({ node, depth, onCtx }: { node: FileNode; depth: number; onCtx
         <div>
           {node.children.length === 0 && (
             <div className="text-[12px] text-[color:var(--ide-text-faint)]" style={{ paddingLeft: 22 + depth * 14 }}>
-              （空）
+              {t("fileTree.empty")}
             </div>
           )}
           {node.children.map((c) => (
@@ -185,6 +188,7 @@ function TreeNode({ node, depth, onCtx }: { node: FileNode; depth: number; onCtx
 }
 
 export function FileTree() {
+  const t = useT();
   const tree = useIde((s) => s.tree);
   const workspace = useIde((s) => s.workspace);
   const refreshFiles = useIde((s) => s.refreshFiles);
@@ -206,32 +210,32 @@ export function FileTree() {
   return (
     <div className="h-full flex flex-col">
       <div className="flex items-center justify-between px-3 py-2 border-b border-[color:var(--ide-border)]">
-        <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase truncate" title={workspace || "当前工作区"}>
-          工程文件
+        <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase truncate" title={workspace || t("fileTree.currentWorkspace")}>
+          {t("fileTree.header")}
         </span>
         <div className="flex items-center gap-1">
           {/* 新建项目向导：与工具栏那个按钮同一个入口（store.showNewProject） */}
           <button
-            title="新建项目…（模板向导：空文件 / 控制台 / 多文件工程 / 课程作业）"
+            title={t("fileTree.newProjectTitle")}
             className="kimi-pop p-1 text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text)]"
             onClick={() => useIde.getState().setShowNewProject(true)}
           >
             <PackagePlus size={14} />
           </button>
           <button
-            title={workspace ? `打开目录（当前：${workspace}）` : "打开目录"}
+            title={workspace ? t("fileTree.openDirTitleCurrent", { path: workspace }) : t("fileTree.openDirTitle")}
             className="kimi-pop p-1 text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text)]"
             onClick={() => setOpenDir(true)}
           >
             <FolderOpen size={14} />
           </button>
           <button
-            title="新建文件"
+            title={t("fileTree.newFileTitle")}
             className="kimi-pop p-1 text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text)]"
             onClick={() =>
               openNameDialog({
-                title: "新建文件",
-                placeholder: "文件名（可包含目录，如 src/main.cpp）",
+                title: t("fileTree.newFileTitle"),
+                placeholder: t("fileTree.fileNamePlaceholder"),
                 initial: "untitled.cpp",
                 onSubmit: (name) => void newFile(name).then((err) => err && window.alert(err)),
               })
@@ -239,7 +243,7 @@ export function FileTree() {
           >
             <FilePlus2 size={14} />
           </button>
-          <button title="刷新" className="kimi-pop p-1 text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text)]" onClick={() => void refreshFiles()}>
+          <button title={t("common.refresh")} className="kimi-pop p-1 text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text)]" onClick={() => void refreshFiles()}>
             <RefreshCw size={14} />
           </button>
         </div>
@@ -247,7 +251,7 @@ export function FileTree() {
       <div className="flex-1 overflow-y-auto py-1" onContextMenu={onBlankCtx}>
         {tree.length === 0 && (
           <div className="text-[12px] text-[color:var(--ide-text-faint)] px-3 py-2">
-            工作区为空。点击上方 + 或在此处右键新建文件。
+            {t("fileTree.emptyWorkspace")}
           </div>
         )}
         {tree.map((n) => (
