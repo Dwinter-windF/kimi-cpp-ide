@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, openStream, type FsEntry } from "@/lib/api";
+import { t } from "@/lib/i18n";
 import { explainError } from "@/lib/analyze";
 import {
   buildTemplate,
@@ -20,13 +21,17 @@ import {
 } from "@/lib/dropImport";
 import {
   AI_FIX_IDLE,
+  EDITOR_FONT_SIZE_RANGE,
+  evalConsoleOf,
   type AiFixState,
   type AiMessage,
+  type AiRunResult,
   type Breakpoint,
   type BuildSystemInfo,
   type CompileResult,
   type DebugFrame,
   type Diagnostic,
+  type EvalConsoleLine,
   type FileNode,
   type OpenWorkspaceResult,
   type PickDirResult,
@@ -64,6 +69,13 @@ interface IdeState {
   // 调试
   debugSessionId: string | null;
   debugStopped: { file: string; line: number; func: string; reason: string } | null;
+  /**
+   * 本次调试会话的「求值控制台」门控快照（startDebug 时从 settings.evalConsole 取值）。
+   * 未开启 / 已退出时不得求值；运行中修改设置不影响已启动的会话。
+   */
+  debugEvalConsole: boolean;
+  /** 求值控制台历史（成功 value / 失败 error），仅本次应用运行期保留 */
+  evalConsoleLines: EvalConsoleLine[];
   callStack: DebugFrame[];
   watchExprs: string[];
   watchValues: Record<string, string>;
@@ -84,7 +96,10 @@ interface IdeState {
   aiFix: AiFixState;
   // UI
   bottomTab: "terminal" | "problems" | "debug" | "ai";
-  editorFontSize: number;
+  /**
+   * 调整编辑器字号（Ctrl+滚轮）：立即写入 settings.editorFontSize 并持久化。
+   * 字号本身存在 Settings 里，不再单独用 localStorage（设置对话框里也能改，二者共用同一份值）。
+   */
   setEditorFontSize: (px: number) => void;
   /** 左右栏宽度 / 底部面板高度（px，持久化在 localStorage） */
   layout: Layout;
@@ -153,16 +168,28 @@ interface IdeState {
   appendTerm: (kind: TermLine["kind"], text: string) => void;
   clearTerm: () => void;
 
-  compile: (project: boolean) => Promise<CompileResult | null>;
+  /**
+   * 编译。opts.keepTab 供 AI 的 compile 工具使用：不抢底部页签，避免工具循环中途
+   * 把 AI 面板切走（普通工具栏/运行流程不传，行为与旧版一致）。
+   */
+  compile: (project: boolean, opts?: { keepTab?: boolean }) => Promise<CompileResult | null>;
   run: () => Promise<void>;
   buildAndRun: () => Promise<void>;
+  /**
+   * AI 的 run 工具：编译当前文件 → POST /api/run → 订阅 SSE，等待退出码与输出。
+   * 最长等待 timeoutMs（默认 15s），超时会 kill 运行会话并返回 timedOut 摘要。
+   */
+  runTool: (timeoutMs?: number) => Promise<AiRunResult>;
   sendInput: (text: string) => Promise<void>;
   kill: () => Promise<void>;
 
   startDebug: () => Promise<void>;
   debugControl: (op: "run" | "continue" | "next" | "step" | "finish" | "quit") => Promise<void>;
   debugEvalExpr: (expr: string) => Promise<string>;
-  /** 请求把表达式按数据结构画图（vector/数组/链表），结果存 vizData */
+  /** 求值控制台：追加一行历史并返回本次结果（服务端负责门控/暂停态校验） */
+  evalConsoleExpr: (expr: string) => Promise<EvalConsoleLine>;
+  clearEvalConsole: () => void;
+  /** 请求把表达式按数据结构画图（vector/数组/链表/map/set/二叉树/二维数组），结果存 vizData */
   showViz: (expr: string) => Promise<void>;
   closeViz: () => void;
   addWatch: (expr: string) => void;
@@ -185,16 +212,13 @@ interface IdeState {
 }
 
 const MAX_TERM = 3000;
-const FONT_KEY = "kimi-ide-fontsize";
 
-function loadFontSize(): number {
-  try {
-    const v = parseFloat(localStorage.getItem(FONT_KEY) || "");
-    if (Number.isFinite(v)) return Math.min(28, Math.max(10, v));
-  } catch {
-    /* ignore */
-  }
-  return 13.5;
+/** 按 UTF-8 字节取文本末尾（AI run 工具只回传最后 2KB 输出） */
+function tailBytes(text: string, limit: number): string {
+  const enc = new TextEncoder();
+  if (enc.encode(text).length <= limit) return text;
+  const bytes = enc.encode(text);
+  return new TextDecoder().decode(bytes.slice(bytes.length - limit));
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +290,8 @@ export const useIde = create<IdeState>((set, get) => {
   let runEs: EventSource | null = null;
   let dbgEs: EventSource | null = null;
   let currentRunId: string | null = null;
+  // Ctrl+滚轮会连续触发：先即时更新 store（界面立即跟手），再合并成一次落盘
+  let fontSizeSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   const push = (kind: TermLine["kind"], text: string) => {
     const lines = [...get().termLines];
@@ -302,6 +328,8 @@ export const useIde = create<IdeState>((set, get) => {
     termLines: [],
     debugSessionId: null,
     debugStopped: null,
+    debugEvalConsole: false,
+    evalConsoleLines: [],
     callStack: [],
     watchExprs: [],
     watchValues: {},
@@ -316,15 +344,18 @@ export const useIde = create<IdeState>((set, get) => {
     compileOutput: "",
     aiFix: AI_FIX_IDLE,
     bottomTab: "terminal",
-    editorFontSize: loadFontSize(),
     setEditorFontSize: (px) => {
-      const v = Math.min(28, Math.max(10, Math.round(px * 2) / 2));
-      try {
-        localStorage.setItem(FONT_KEY, String(v));
-      } catch {
-        /* ignore */
-      }
-      set({ editorFontSize: v });
+      const v = Math.min(
+        EDITOR_FONT_SIZE_RANGE.max,
+        Math.max(EDITOR_FONT_SIZE_RANGE.min, Math.round(px))
+      );
+      const next = { ...get().settings, editorFontSize: v };
+      set({ settings: next });
+      if (fontSizeSaveTimer) clearTimeout(fontSizeSaveTimer);
+      fontSizeSaveTimer = setTimeout(() => {
+        fontSizeSaveTimer = null;
+        void get().updateSettings(get().settings);
+      }, 250);
     },
     layout: loadLayout(),
     setLayout: (patch, commit = false) => {
@@ -383,9 +414,9 @@ export const useIde = create<IdeState>((set, get) => {
           body: JSON.stringify({ path }),
         });
         data = (await res.json().catch(() => ({}))) as OpenWorkspaceResult;
-        if (!res.ok) return data.error || `切换工作区失败 (${res.status})`;
+        if (!res.ok) return data.error || t("store.openWorkspaceFailed", { status: res.status });
       } catch (e) {
-        return "切换工作区失败：" + (e instanceof Error ? e.message : String(e));
+        return t("store.openWorkspaceFailedWith", { message: e instanceof Error ? e.message : String(e) });
       }
       // 旧工作区的标签/内容/断点/终端/问题/调试面板全部作废，一并重置
       set({
@@ -407,6 +438,8 @@ export const useIde = create<IdeState>((set, get) => {
         compilingProject: false,
         debugSessionId: null,
         debugStopped: null,
+        debugEvalConsole: false,
+        evalConsoleLines: [],
         callStack: [],
         locals: [],
         watchValues: {},
@@ -483,7 +516,7 @@ export const useIde = create<IdeState>((set, get) => {
     // -------------------------------------------------------------------------
     createProject: async (id, name) => {
       const tpl = getTemplate(id);
-      if (!tpl) return { ok: false, created: [], failed: [], error: `未知模板：${id}` };
+      if (!tpl) return { ok: false, created: [], failed: [], error: t("store.unknownTemplate", { id }) };
       // 名称校验：对话框已经实时校验过，这里再兜一次（对话框只是 UI，编排层必须自洽）
       const bad = validateProjectName(name, tpl.kind);
       if (bad) return { ok: false, created: [], failed: [], error: bad };
@@ -507,7 +540,7 @@ export const useIde = create<IdeState>((set, get) => {
       // ② 重名自动改名（name → name-1），与拖拽导入完全一致；详见 uniqueRootName 的注释
       const uniq = uniqueRootName(stem, ext, taken);
       if (uniq.exhausted) {
-        return { ok: false, created: [], failed: [], error: `同名「${name}」太多，无法自动改名（已尝试 999 次）` };
+        return { ok: false, created: [], failed: [], error: t("store.tooManySameName", { name }) };
       }
       const plan = buildTemplate(id, uniq.root);
 
@@ -515,8 +548,8 @@ export const useIde = create<IdeState>((set, get) => {
       if (plan.kind === "project") {
         const mk = await api.fsMkdir(plan.root);
         if (mk.error) {
-          push("err", `✗ 创建目录 ${plan.root} 失败：${mk.error}`);
-          return { ok: false, label: tpl.label, root: plan.root, created: [], failed: [], error: `创建目录「${plan.root}」失败：${mk.error}` };
+          push("err", t("store.mkdirFailedTerminal", { root: plan.root, error: mk.error }));
+          return { ok: false, label: t(`template.${tpl.id}.label`), root: plan.root, created: [], failed: [], error: t("store.mkdirFailed", { root: plan.root, error: mk.error }) };
         }
       }
 
@@ -555,19 +588,19 @@ export const useIde = create<IdeState>((set, get) => {
 
       // ⑥ 终端摘要：逐条列出落盘文件（.vscode/* 被文件树的隐藏规则跳过，不列出来用户看不见）、
       //    改名情况与失败原因
-      const where = plan.kind === "project" ? `目录 ${plan.root}/` : "工作区根目录";
+      const where = plan.kind === "project" ? t("store.whereProject", { root: plan.root }) : t("store.whereRoot");
       if (created.length > 0) {
-        push("sys", `✓ 已创建「${tpl.label}」：${created.length}/${plan.files.length} 个文件（${where}）`);
+        push("sys", t("store.createdSummary", { label: t(`template.${tpl.id}.label`), created: created.length, total: plan.files.length, where }));
         for (const p of created) push("sys", `  · ${p}`);
       }
-      if (uniq.renamed) push("sys", `  · 已存在同名 ${originalRoot}，自动改名为 ${plan.root}`);
-      for (const f of failed) push("err", `✗ 写入失败 ${f.path}：${f.reason}`);
-      if (created.length === 0) push("err", `✗ 创建「${tpl.label}」失败：没有任何文件写入成功`);
-      else if (failed.length > 0) push("err", `⚠ 部分文件写入失败（已创建的文件不回滚，可手动删除）`);
+      if (uniq.renamed) push("sys", t("store.renamed", { original: originalRoot, root: plan.root }));
+      for (const f of failed) push("err", t("store.writeFailed", { path: f.path, reason: f.reason }));
+      if (created.length === 0) push("err", t("store.createFailed", { label: t(`template.${tpl.id}.label`) }));
+      else if (failed.length > 0) push("err", t("store.partialFailed"));
 
       return {
         ok: failed.length === 0 && created.length > 0,
-        label: tpl.label,
+        label: t(`template.${tpl.id}.label`),
         root: plan.root,
         renamed: uniq.renamed,
         originalRoot: uniq.renamed ? originalRoot : undefined,
@@ -576,7 +609,7 @@ export const useIde = create<IdeState>((set, get) => {
         failed,
         error:
           created.length === 0
-            ? `没有任何文件写入成功（首个失败：${failed[0]?.reason ?? "未知原因"}）`
+            ? t("store.noFileWritten", { reason: failed[0]?.reason ?? t("common.unknownReason") })
             : undefined,
       };
     },
@@ -627,35 +660,35 @@ export const useIde = create<IdeState>((set, get) => {
       for (const en of entries) {
         // ① 目录：暂不支持（webkitGetAsEntry 判定），给中文提示而不是静默丢弃
         if (en.isDir) {
-          skipped.push({ name: en.name, reason: "暂不支持导入文件夹，请拖入单个文件" });
+          skipped.push({ name: en.name, reason: t("store.skipFolder") });
           continue;
         }
         const file = en.file;
         if (!file) {
-          skipped.push({ name: en.name, reason: "无法读取该条目" });
+          skipped.push({ name: en.name, reason: t("store.skipUnreadable") });
           continue;
         }
         // ② 扩展名过滤：不支持的类型在前端就拦掉，不发请求
         if (!isSupportedImport(file.name)) {
-          skipped.push({ name: file.name, reason: "不支持的文件类型（支持 .c/.cc/.cpp/.cxx/.h/.hh/.hpp/.hxx/.txt/.md）" });
+          skipped.push({ name: file.name, reason: t("store.skipUnsupported") });
           continue;
         }
         // ③ 体积预检：与服务端 8MB 上限一致，避免给超大文件白做一次 base64 编码
         if (file.size > IMPORT_MAX_BYTES) {
-          skipped.push({ name: file.name, reason: `文件 ${formatBytes(file.size)} 超过 ${formatBytes(IMPORT_MAX_BYTES)} 上限` });
+          skipped.push({ name: file.name, reason: t("store.skipTooLarge", { size: formatBytes(file.size), max: formatBytes(IMPORT_MAX_BYTES) }) });
           continue;
         }
         let b64: string;
         try {
           b64 = await readFileAsBase64(file);
         } catch (e) {
-          skipped.push({ name: file.name, reason: e instanceof Error ? e.message : "读取文件失败" });
+          skipped.push({ name: file.name, reason: e instanceof Error ? e.message : t("store.skipReadFailed") });
           continue;
         }
         // ④ 逐个上传：只传文件名，服务端落到工作区根目录；同名会自动改名（name.cpp → name-1.cpp）
         const r = await api.uploadFile(file.name.replace(/[\\/]/g, "_"), b64);
         if (r.error || !r.path) {
-          skipped.push({ name: file.name, reason: r.error || "上传失败" });
+          skipped.push({ name: file.name, reason: r.error || t("store.skipUploadFailed") });
           continue;
         }
         imported.push(r.path);
@@ -666,10 +699,10 @@ export const useIde = create<IdeState>((set, get) => {
       if (imported.length > 0) {
         await get().refreshFiles();
         await get().openFile(imported[0]);
-        push("sys", `✓ 已导入 ${imported.length} 个文件到工作区：${imported.join("、")}`);
+        push("sys", t("store.imported", { count: imported.length, paths: imported.join("、") }));
       }
-      for (const r of renamed) push("sys", `  · ${r.from} 同名，已导入为 ${r.to}`);
-      for (const s of skipped) push("err", `✗ 跳过 ${s.name}：${s.reason}`);
+      for (const r of renamed) push("sys", t("store.importRenamed", { from: r.from, to: r.to }));
+      for (const s of skipped) push("err", t("store.importSkipped", { name: s.name, reason: s.reason }));
 
       return { imported, renamed, skipped };
     },
@@ -707,14 +740,16 @@ export const useIde = create<IdeState>((set, get) => {
     appendTerm: push,
     clearTerm: () => set({ termLines: [] }),
 
-    compile: async (project) => {
+    compile: async (project, opts) => {
       const st = get();
       if (!st.activeFile) {
-        push("sys", "⚠ 请先打开一个源文件");
+        push("sys", t("store.openFileFirst"));
         return null;
       }
-      set({ runState: "compiling", compilingProject: project, bottomTab: "terminal" });
-      push("sys", project ? "── 编译工程…" : `── 编译 ${st.activeFile} …`);
+      // keepTab：AI 工具调用时不要把底部面板从 AI 页签切走
+      const keepTab = opts?.keepTab === true;
+      set({ runState: "compiling", compilingProject: project, ...(keepTab ? {} : { bottomTab: "terminal" as const }) });
+      push("sys", project ? t("store.compilingProject") : t("store.compilingFile", { file: st.activeFile }));
       await get().saveAll();
       const res = await api.compile(st.activeFile, project, get().settings.std);
       // 保存编译器原始输出：AI 一键修复把它作为「完整编译错误文本」的一部分发给 AI
@@ -722,12 +757,12 @@ export const useIde = create<IdeState>((set, get) => {
       // 构建系统可能随 Makefile/CMakeLists.txt 增删变化：用本次编译的探测结果刷新徽标
       if (res.buildSystem) set({ buildSystem: res.buildSystem });
       if (res.buildSystem && res.buildSystem.kind !== "single") {
-        push("sys", `  构建系统: ${res.buildSystem.label}（${res.buildSystem.evidence}）`);
+        push("sys", t("store.buildSystem", { label: res.buildSystem.label, evidence: res.buildSystem.evidence }));
       }
       if (res.noCompiler) {
-        push("err", `✗ 未找到编译器${res.need ? `（需要 ${res.need}）` : ""}。`);
-        push("sys", "  请安装 MinGW-w64 / MSYS2（pacman -S mingw-w64-ucrt-x86_64-gcc gdb），");
-        push("sys", "  或在「设置」中手动指定编译器路径。");
+        push("err", t("store.noCompiler", { need: res.need ? t("store.noCompilerNeed", { need: res.need }) : "" }));
+        push("sys", t("store.installHint1"));
+        push("sys", t("store.installHint2"));
         set({ runState: "idle", problems: [] });
         set({ showSettings: true });
         return res;
@@ -743,15 +778,15 @@ export const useIde = create<IdeState>((set, get) => {
       const diags: Diagnostic[] = (res.diagnostics || []).map((d) => ({ ...d, hint: explainError(d) }));
       set({ problems: diags.filter((d) => d.severity !== "note") });
       if (res.ok) {
-        push("sys", `✓ 编译成功 (${res.ms}ms)`);
+        push("sys", t("store.compileSuccess", { ms: res.ms ?? 0 }));
         // 单文件流程沿用「编译器」措辞；CMake/Make 流程实际执行的是构建工具
         if (res.compiler) {
           const isBuildTool = res.buildSystem && res.buildSystem.kind !== "single";
-          push("sys", `  ${isBuildTool ? "构建工具" : "编译器"}: ${res.compiler}`);
+          push("sys", `  ${isBuildTool ? t("store.buildTool") : t("store.compiler")}: ${res.compiler}`);
         }
       } else {
-        push("err", `✗ 编译失败：${get().problems.filter((d) => d.severity === "error").length} 个错误`);
-        set({ bottomTab: "problems" });
+        push("err", t("store.compileFailed", { count: get().problems.filter((d) => d.severity === "error").length }));
+        if (!keepTab) set({ bottomTab: "problems" });
       }
       set({ runState: "idle" });
       return res;
@@ -767,7 +802,7 @@ export const useIde = create<IdeState>((set, get) => {
       }
       currentRunId = r.id;
       set({ runState: "running", bottomTab: "terminal" });
-      push("sys", `── 运行 ${res.exe} ──`);
+      push("sys", t("store.runHeader", { exe: res.exe }));
       runEs = openStream(`/api/run/${r.id}/stream`, {
         out: (d) => {
           const { stream, text } = d as { stream: string; text: string };
@@ -776,12 +811,83 @@ export const useIde = create<IdeState>((set, get) => {
         exit: (d) => {
           const { code, error } = d as { code: number; error?: string };
           if (error) push("err", "✗ " + error);
-          push("sys", `── 进程结束 (退出码 ${code}) ──`);
+          push("sys", t("store.processExit", { code }));
           set({ runState: "idle" });
           runEs?.close();
           runEs = null;
           currentRunId = null;
         },
+      });
+    },
+
+    runTool: async (timeoutMs = 15_000) => {
+      // 复用现有 compile → /api/run → SSE 链路；keepTab 避免 AI 工具循环中途切换页签。
+      const res = await get().compile(false, { keepTab: true });
+      if (!res || !res.ok || !res.exe) {
+        const firstError = res?.diagnostics?.find((d) => d.severity === "error");
+        return {
+          ok: false,
+          output: res?.output || "",
+          error:
+            res?.error ||
+            (firstError
+              ? `${firstError.file || t("common.linkStage")}:${firstError.line}:${firstError.col} ${firstError.message}`
+              : t("store.openFileFirst")),
+        };
+      }
+      const r = await api.run(res.exe);
+      if (r.error) return { ok: false, output: "", error: r.error };
+      const id = r.id;
+      currentRunId = id;
+      set({ runState: "running" });
+      push("sys", t("store.runHeader", { exe: res.exe }));
+      return new Promise<AiRunResult>((resolve) => {
+        let collected = "";
+        let finished = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let es: EventSource | null = null;
+        const finish = (result: AiRunResult) => {
+          if (finished) return;
+          finished = true;
+          if (timer) clearTimeout(timer);
+          // 本工具的 SSE 一律关闭；只有仍是本会话时才收尾，避免用户紧接着手动运行后把新会话状态清掉
+          if (es) {
+            es.close();
+            if (runEs === es) runEs = null;
+          }
+          if (currentRunId === id) {
+            currentRunId = null;
+            if (get().runState === "running") set({ runState: "idle" });
+          }
+          resolve({ ...result, output: tailBytes(result.output || collected, 2048) });
+        };
+        timer = setTimeout(() => {
+          const msg = t("ai.tool.runTimeout", { seconds: Math.round(timeoutMs / 1000) });
+          push("err", "✗ " + msg);
+          // 服务端有 10s 运行保护；这里再兜底一次，确保工具不会无限等待
+          void api.runKill(id).catch(() => {});
+          finish({ ok: false, timedOut: true, code: null, output: collected, error: msg });
+        }, timeoutMs);
+        es = openStream(`/api/run/${id}/stream`, {
+          out: (d) => {
+            const { stream, text } = d as { stream: string; text: string };
+            collected += text;
+            // 防止长时间输出把内存撑爆；只保留尾部 64KB（最终只回传 2KB）
+            if (collected.length > 65536) collected = collected.slice(-65536);
+            push(stream === "stderr" ? "err" : "out", text);
+          },
+          exit: (d) => {
+            const { code, error } = d as { code: number; error?: string };
+            if (error) {
+              push("err", "✗ " + error);
+              finish({ ok: false, code, output: collected, error });
+            } else {
+              push("sys", t("store.processExit", { code }));
+              finish({ ok: code === 0, code, output: collected });
+            }
+          },
+        });
+        runEs = es;
       });
     },
 
@@ -795,7 +901,7 @@ export const useIde = create<IdeState>((set, get) => {
       }
       currentRunId = r.id;
       set({ runState: "running", bottomTab: "terminal" });
-      push("sys", `── 运行 ${res.exe} ──`);
+      push("sys", t("store.runHeader", { exe: res.exe }));
       runEs = openStream(`/api/run/${r.id}/stream`, {
         out: (d) => {
           const { stream, text } = d as { stream: string; text: string };
@@ -804,7 +910,7 @@ export const useIde = create<IdeState>((set, get) => {
         exit: (d) => {
           const { code, error } = d as { code: number; error?: string };
           if (error) push("err", "✗ " + error);
-          push("sys", `── 进程结束 (退出码 ${code}) ──`);
+          push("sys", t("store.processExit", { code }));
           set({ runState: "idle" });
           runEs?.close();
           runEs = null;
@@ -824,8 +930,8 @@ export const useIde = create<IdeState>((set, get) => {
       if (currentRunId) await api.runKill(currentRunId);
       if (get().debugSessionId) await api.debugCmd(get().debugSessionId!, "quit", get().watchExprs);
       closeStreams();
-      set({ runState: "idle", debugSessionId: null, debugStopped: null, callStack: [], locals: [], watchValues: {}, watchErrors: {}, watchChanged: {}, vizData: null, vizExpr: null, vizBusy: false });
-      push("sys", "── 已停止 ──");
+      set({ runState: "idle", debugSessionId: null, debugStopped: null, debugEvalConsole: false, callStack: [], locals: [], watchValues: {}, watchErrors: {}, watchChanged: {}, vizData: null, vizExpr: null, vizBusy: false });
+      push("sys", t("store.stopped"));
     },
 
     startDebug: async () => {
@@ -834,9 +940,11 @@ export const useIde = create<IdeState>((set, get) => {
       const st = get();
       const bps = st.allBreakpoints();
       if (bps.length === 0) {
-        push("sys", "⚠ 尚未设置断点：点击编辑器行号左侧圆点添加断点（至少一个）");
+        push("sys", t("store.noBreakpoints"));
       }
-      const r = await api.debugStart(res.exe, bps, st.watchExprs);
+      // 门控快照：本次会话固定用「开始调试时」的 settings.evalConsole，运行中改设置不影响
+      const evalConsole = evalConsoleOf(st.settings);
+      const r = await api.debugStart(res.exe, bps, st.watchExprs, evalConsole);
       if (r.error) {
         push("err", "✗ " + r.error);
         return;
@@ -846,6 +954,8 @@ export const useIde = create<IdeState>((set, get) => {
         debugSessionId: r.id,
         bottomTab: "debug",
         debugStopped: null,
+        debugEvalConsole: evalConsole,
+        evalConsoleLines: [],
         callStack: [],
         watchValues: {},
         watchErrors: {},
@@ -855,7 +965,7 @@ export const useIde = create<IdeState>((set, get) => {
         vizExpr: null,
         vizBusy: false,
       });
-      push("sys", `── 调试会话开始 (${res.exe}) ──`);
+      push("sys", t("store.debugStart", { exe: res.exe }));
       dbgEs = openStream(`/api/debug/${r.id}/stream`, {
         console: (d) => push("out", (d as { text: string }).text),
         log: (d) => {
@@ -897,16 +1007,16 @@ export const useIde = create<IdeState>((set, get) => {
             locals: s.locals,
             bottomTab: "debug",
           });
-          push("sys", `⏸ 停在 ${s.func || "?"} @ ${s.file || "?"}:${s.line} (${s.reason})`);
+          push("sys", t("store.stoppedAt", { func: s.func || "?", file: s.file || "?", line: s.line, reason: s.reason }));
           // 正在展示的结构图随本次停止自动刷新
           const vz = get().vizExpr;
           if (vz) void get().showViz(vz);
         },
         exited: (d) => {
           const { reason } = d as { reason: string };
-          push("sys", `── 调试结束 (${reason}) ──`);
+          push("sys", t("store.debugEnd", { reason }));
           closeStreams();
-          set({ runState: "idle", debugSessionId: null, debugStopped: null, callStack: [], locals: [], watchValues: {}, watchErrors: {}, watchChanged: {}, vizData: null, vizExpr: null, vizBusy: false });
+          set({ runState: "idle", debugSessionId: null, debugStopped: null, debugEvalConsole: false, callStack: [], locals: [], watchValues: {}, watchErrors: {}, watchChanged: {}, vizData: null, vizExpr: null, vizBusy: false });
         },
       });
       await get().debugControl("run");
@@ -924,7 +1034,7 @@ export const useIde = create<IdeState>((set, get) => {
 
     debugEvalExpr: async (expr) => {
       const id = get().debugSessionId;
-      if (!id) throw new Error("未在调试中");
+      if (!id) throw new Error(t("store.notDebugging"));
       // 命中"忙"（停止处理中）时短暂重试一次
       for (let attempt = 0; attempt < 2; attempt++) {
         const r = await api.debugEval(id, expr);
@@ -935,14 +1045,40 @@ export const useIde = create<IdeState>((set, get) => {
         if (r.error) throw new Error(r.error);
         return r.value ?? "";
       }
-      throw new Error("求值超时，请重试");
+      throw new Error(t("store.evalTimeout"));
     },
+
+    evalConsoleExpr: async (expr) => {
+      const e = expr.trim();
+      let line: EvalConsoleLine;
+      if (e.length > 500) {
+        line = { expr: e.slice(0, 500), error: t("bottom.evalConsole.tooLong") };
+      } else if (!get().debugSessionId) {
+        line = { expr: e, error: t("bottom.evalConsole.notDebugging") };
+      } else if (!get().debugEvalConsole) {
+        line = { expr: e, error: t("bottom.evalConsole.gateOff") };
+      } else if (!get().debugStopped) {
+        // 运行中 / 已退出 / 正在处理上一条停止事件时都不可输入
+        line = { expr: e, error: t("bottom.evalConsole.notPaused") };
+      } else {
+        try {
+          const r = await api.debugEval(get().debugSessionId!, e);
+          line = r.error ? { expr: e, error: r.error } : { expr: e, value: r.value ?? "" };
+        } catch (err) {
+          line = { expr: e, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      set((s) => ({ evalConsoleLines: [...s.evalConsoleLines, line].slice(-100) }));
+      return line;
+    },
+
+    clearEvalConsole: () => set({ evalConsoleLines: [] }),
 
     showViz: async (expr) => {
       const id = get().debugSessionId;
       if (!id) return;
       set({ vizExpr: expr, vizBusy: true });
-      let r: VizData = { kind: "error", error: "获取可视化数据超时" };
+      let r: VizData = { kind: "error", error: t("store.vizTimeout") };
       for (let attempt = 0; attempt < 2; attempt++) {
         const res = await api.debugViz(id, expr);
         if (res.error === "忙") {
@@ -979,7 +1115,7 @@ export const useIde = create<IdeState>((set, get) => {
       set({ aiMessages: msgs, aiBusy: true, bottomTab: "ai" });
       const r = await api.ai(msgs.slice(-20));
       set((s) => ({
-        aiMessages: [...s.aiMessages, { role: "assistant", content: r.error ? "⚠ " + r.error : r.content || "(空回复)" }],
+        aiMessages: [...s.aiMessages, { role: "assistant", content: r.error ? "⚠ " + r.error : r.content || t("store.emptyReply") }],
         aiBusy: false,
       }));
     },
@@ -1014,11 +1150,11 @@ export const useIde = create<IdeState>((set, get) => {
       set({ contents, dirty });
       if (failed.length > 0) {
         set((s) => ({
-          aiFix: { ...s.aiFix, error: "部分文件写回失败：\n· " + failed.join("\n· ") },
+          aiFix: { ...s.aiFix, error: t("store.aiFixPartial", { failed: failed.join("\n· ") }) },
         }));
         return;
       }
-      push("sys", `✓ 已应用 AI 修复：${st.aiFix.files.map((f) => f.path).join("、")}`);
+      push("sys", t("store.aiFixApplied", { paths: st.aiFix.files.map((f) => f.path).join("、") }));
       set({ aiFix: AI_FIX_IDLE });
     },
 
