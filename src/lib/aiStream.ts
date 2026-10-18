@@ -13,6 +13,7 @@
  * 不会打断用户打字。
  */
 import { buildChatBody, resolveAiEndpoint, type ChatMessage } from "@/lib/ai";
+import { t } from "@/lib/i18n";
 import type { Settings } from "@/types";
 
 /**
@@ -98,7 +99,7 @@ export async function streamChat(
 ): Promise<{ text: string; error?: string }> {
   const { settings, messages, temperature, timeoutMs, signal, onDelta } = opts;
   const endpoint = resolveAiEndpoint(settings);
-  if (!endpoint) return { text: "", error: "未配置 AI 接口" };
+  if (!endpoint) return { text: "", error: t("aiStream.errNotConfigured") };
 
   const ctrl = new AbortController();
   const composite = compositeSignal(ctrl, signal);
@@ -130,12 +131,12 @@ export async function streamChat(
       });
     } catch (e) {
       if (signal?.aborted || timedOut) return { text }; // 主动中止 / 超时：不算错误
-      return { text, error: `AI 请求失败：${e instanceof Error ? e.message : String(e)}` };
+      return { text, error: t("aiStream.errRequestFailed", { message: e instanceof Error ? e.message : String(e) }) };
     }
     if (!resp.ok) {
       // 响应体只取一小段做诊断信息，且只有调用方想看的时候才用得上
       const raw = await resp.text().catch(() => "");
-      return { text, error: `AI 接口返回 ${resp.status}：${raw.slice(0, 200)}` };
+      return { text, error: t("aiStream.errHttp", { status: resp.status, body: raw.slice(0, 200) }) };
     }
     if (!resp.body) {
       // 极少数环境拿不到可读流：退化成一次性读取，仍有结果可用
@@ -189,7 +190,7 @@ export async function streamChat(
       }
     } catch (e) {
       if (signal?.aborted || timedOut) return { text };
-      return { text, error: `AI 流式读取中断：${e instanceof Error ? e.message : String(e)}` };
+      return { text, error: t("aiStream.errStream", { message: e instanceof Error ? e.message : String(e) }) };
     } finally {
       void reader.cancel().catch(() => undefined); // 提前 return（[DONE]）时释放底层连接
     }
