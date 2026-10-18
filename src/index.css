@@ -71,6 +71,10 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* 界面字体 / 字号（非编辑器区）：值由 App.tsx 写入 <html> 的 --ide-ui-* 变量。
+       var() 的第二个参数保留改动前的原值作为兜底，设置不可用时观感不变。 */
+    font-family: var(--ide-ui-font, "Segoe UI", "Microsoft YaHei", "微软雅黑", system-ui, sans-serif);
+    font-size: var(--ide-ui-font-size, 13px);
   }
 }
 
