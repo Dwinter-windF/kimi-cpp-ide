@@ -8,12 +8,13 @@ import type {
   Toolchain,
   VizData,
 } from "@/types";
+import { t } from "@/lib/i18n";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
   if (!res.ok && !("error" in data && data.error)) {
-    (data as { error?: string }).error = `请求失败 (${res.status})`;
+    (data as { error?: string }).error = t("api.requestFailed", { status: res.status });
   }
   return data;
 }
@@ -21,6 +22,8 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   toolchain: () => req<Toolchain>("/api/toolchain"),
   getSettings: () => req<Settings>("/api/settings"),
+  /** 系统已安装字体族名（GET /api/fonts 直接返回 JSON 字符串数组） */
+  fonts: () => req<string[]>("/api/fonts"),
   saveSettings: (s: Settings) =>
     req<Settings>("/api/settings", {
       method: "POST",
@@ -105,11 +108,17 @@ export const api = {
       body: JSON.stringify({ text }),
     }),
   runKill: (id: string) => req<{ ok: boolean }>(`/api/run/${id}/kill`, { method: "POST" }),
-  debugStart: (exe: string, breakpoints: { file: string; line: number }[], watch: string[]) =>
+  debugStart: (
+    exe: string,
+    breakpoints: { file: string; line: number }[],
+    watch: string[],
+    evalConsole?: boolean
+  ) =>
     req<{ id: string; error?: string }>("/api/debug", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ exe, breakpoints, watch }),
+      // evalConsole 为可选字段：不传时服务端按 false 处理，旧调用方行为不变
+      body: JSON.stringify({ exe, breakpoints, watch, evalConsole }),
     }),
   debugCmd: (id: string, op: string, watch?: string[]) =>
     req<{ ok: boolean }>(`/api/debug/${id}`, {
@@ -118,7 +127,7 @@ export const api = {
       body: JSON.stringify({ op, watch }),
     }),
   debugEval: (id: string, expr: string) =>
-    req<{ value?: string; error?: string }>(`/api/debug/${id}/eval`, {
+    req<{ ok?: boolean; value?: string; error?: string }>(`/api/debug/${id}/eval`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ expr }),
@@ -129,6 +138,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ expr }),
     }),
+  /**
+   * clang-format 一键格式化（POST /api/format）：只读工作区文件并返回格式化全文，不写盘。
+   * 失败时带 error + code（前端按 code 走 i18n）；style 可选，缺省由服务端决定
+   * （有 .clang-format 用 file，否则 LLVM）。
+   */
+  formatFile: (file: string, style?: string) =>
+    req<{ ok?: boolean; path?: string; content?: string; style?: string; bytes?: number; error?: string; code?: string }>(
+      "/api/format",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file, style }),
+      }
+    ),
   ai: (messages: AiMessage[]) =>
     req<{ content?: string; error?: string }>("/api/ai", {
       method: "POST",
