@@ -9,8 +9,9 @@
  * （store 里的 aiMessages 由调用方维护），因此两处入口复用同一套代码、零复制粘贴。
  * 所有错误一律转成中文文案返回，不向调用方抛异常（AI 未配置 / 超时 / 返回无法解析都在这里兜住）。
  */
-import type { Settings } from "@/types";
+import type { AiContext, Settings } from "@/types";
 import { useIde } from "@/store";
+import { t } from "@/lib/i18n";
 
 // ---------------------------------------------------------------------------
 // 工作区文件工具（OpenAI tools / function calling 格式）
@@ -76,6 +77,60 @@ export const FS_TOOLS = [
     },
   },
 ] as const;
+
+// ---------------------------------------------------------------------------
+// 前端 IDE 工具（不需要服务端改动）：
+//   compile / run / get_problems / open_file
+// 这些工具直接复用 store 现有的编译 / 运行 / 问题列表 / 打开文件能力，
+// 执行结果与文件工具一样以 role:'tool' 回灌给模型，由模型决定下一步。
+// ---------------------------------------------------------------------------
+export const IDE_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "compile",
+      description: "编译当前工程（构建全部源文件，走 IDE 现有构建流程）。返回是否成功、错误数、首条错误与输出摘要。",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "run",
+      description:
+        "编译并运行当前程序，等待进程结束（最长 15 秒）。返回退出码与最后 2KB 输出；超时返回 timeout 摘要。",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_problems",
+      description: "读取当前编辑器/编译诊断列表（错误、警告及提示），用于定位编译失败原因。",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_file",
+      description: "在当前工作区内打开一个文本文件（相对路径），切换编辑器到该文件。只能打开工作区内的文件。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "相对工作区根目录的文件路径，例如 src/main.cpp" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+] as const;
+
+/** 发给模型的完整工具表：工作区文件工具 + 前端 IDE 工具 */
+export const AI_TOOLS = [...FS_TOOLS, ...IDE_TOOLS] as const;
+
+/** 前端 IDE 工具名集合（runToolLoop 用它决定走本地 store 还是 /api/fs/*） */
+const IDE_TOOL_NAMES = new Set<string>(IDE_TOOLS.map((x) => x.function.name));
 
 /** 一次对话最多 8 轮「请求模型 → 执行工具 → 结果回灌」循环 */
 export const MAX_TOOL_ROUNDS = 8;
@@ -157,9 +212,9 @@ export function buildChatBody(
 export function aiConfigHint(s: Settings | undefined): string {
   const hasEndpoint = !!(s?.aiEndpoint || "").trim();
   const hasKey = !!(s?.aiKey || "").trim();
-  if (!hasEndpoint && !hasKey) return "未配置 AI 接口：请在「设置 → AI 接口」填写接口地址与密钥后使用。";
-  if (!hasEndpoint) return "未配置 AI 接口地址：请在「设置 → AI 接口」填写接口地址后使用。";
-  if (!hasKey) return "未配置 AI 密钥：请在「设置 → AI 接口」填写密钥后使用。";
+  if (!hasEndpoint && !hasKey) return t("ai.configHint.both");
+  if (!hasEndpoint) return t("ai.configHint.endpoint");
+  if (!hasKey) return t("ai.configHint.key");
   return "";
 }
 
@@ -178,15 +233,23 @@ export function toolActionLabel(name: string, args: ToolArgs): string {
   const p = argPath(args) || ".";
   switch (name) {
     case "read_file":
-      return `🔧 读取 ${p}`;
+      return t("ai.action.read", { path: p });
     case "list_files":
-      return `🔧 列出目录 ${p}`;
+      return t("ai.action.list", { path: p });
     case "write_file": {
       const text = typeof args.content === "string" ? args.content : "";
-      return `🔧 写入 ${p} (${formatBytes(new TextEncoder().encode(text).length)})`;
+      return t("ai.action.write", { path: p, size: formatBytes(new TextEncoder().encode(text).length) });
     }
     case "delete_file":
-      return `🔧 删除 ${p}`;
+      return t("ai.action.delete", { path: p });
+    case "compile":
+      return t("ai.action.compile");
+    case "run":
+      return t("ai.action.run");
+    case "get_problems":
+      return t("ai.action.problems");
+    case "open_file":
+      return t("ai.action.open", { path: p });
     default:
       return `🔧 ${name}`;
   }
@@ -321,6 +384,104 @@ export async function runFsTool(name: string, args: ToolArgs): Promise<string> {
   }
 }
 
+/**
+ * 把模型给的路径收敛成工作区相对 POSIX 路径。
+ *  - 反斜杠统一成 /；去掉开头的 ./；
+ *  - 绝对路径只允许落在当前工作区内，否则返回空串（拒绝打开工作区外文件）；
+ *  - 含 `..` 段的路径直接拒绝，避免 store 里的文件 key 与文件树不一致。
+ * 真正的越界校验仍由服务端 toAbs 兜底（403），这里只做前端预检与归一化。
+ */
+function normalizeWorkspacePath(raw: string): string {
+  let p = raw.replace(/\\/g, "/").trim();
+  while (p.startsWith("./")) p = p.slice(2);
+  if (!p || p.startsWith("../") || p.split("/").includes("..")) return "";
+  const ws = (useIde.getState().workspace || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  const isAbs = /^[A-Za-z]:\//.test(p) || p.startsWith("/");
+  if (isAbs) {
+    if (!ws) return "";
+    const low = p.toLowerCase();
+    const wl = ws.toLowerCase();
+    if (!low.startsWith(wl + "/")) return "";
+    p = p.slice(ws.length + 1);
+  }
+  return p;
+}
+
+/** 执行一个前端 IDE 工具，失败也用中文文本返回（让模型能自我纠正） */
+async function runIdeTool(name: string, args: ToolArgs): Promise<string> {
+  try {
+    if (name === "compile") {
+      const st = useIde.getState();
+      if (!st.activeFile) return "错误：当前没有打开的文件，无法编译。";
+      const res = await st.compile(true, { keepTab: true });
+      if (!res) return "错误：编译未执行（没有打开的文件）。";
+      const errors = (res.diagnostics || []).filter((d) => d.severity === "error");
+      const first = errors[0];
+      const lines = [
+        res.ok
+          ? `编译成功${typeof res.ms === "number" ? `（${res.ms} ms）` : ""}`
+          : `编译失败${res.noCompiler ? "（未找到编译器）" : ""}：错误 ${errors.length} 个`,
+      ];
+      if (first) {
+        lines.push(`首条错误：${first.file || "(链接阶段)"}:${first.line}:${first.col} ${first.message}`);
+      } else if (res.error) {
+        lines.push(`错误：${res.error}`);
+      }
+      if (res.output?.trim()) lines.push(`编译输出：\n${clipBytes(res.output, 4000, 0.6, "编译输出过大")}`);
+      return lines.join("\n");
+    }
+    if (name === "run") {
+      const r = await useIde.getState().runTool(15_000);
+      if (r.timedOut) {
+        return `运行超时（超过 15 秒，timeout）${r.output ? `\n最后输出（最多 2KB）：\n${r.output}` : ""}`;
+      }
+      if (r.error && r.code == null) {
+        return `运行失败：${r.error}${r.output ? `\n最后输出（最多 2KB）：\n${r.output}` : ""}`;
+      }
+      return [
+        `退出码：${r.code == null ? "?" : r.code}`,
+        r.error ? `错误：${r.error}` : "",
+        `最后输出（最多 2KB）：\n${r.output || "（无输出）"}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    if (name === "get_problems") {
+      const st = useIde.getState();
+      if (st.problems.length === 0) return "当前没有诊断或编译错误。";
+      const lines = st.problems
+        .slice(0, 50)
+        .map(
+          (p) =>
+            `${p.file || "(链接阶段)"}:${p.line}:${p.col} [${p.severity}] ${p.message}${p.hint ? `（提示：${p.hint}）` : ""}`
+        );
+      const more = st.problems.length > 50 ? `\n…（其余 ${st.problems.length - 50} 条已省略）` : "";
+      return `共 ${st.problems.length} 条诊断（当前文件：${st.activeFile || "无"}）：\n${lines.join("\n")}${more}`;
+    }
+    if (name === "open_file") {
+      const raw = argPath(args);
+      if (!raw) return "错误：缺少 path 参数";
+      const p = normalizeWorkspacePath(raw);
+      if (!p) return `错误：路径不在当前工作区内或包含非法片段：${raw}`;
+      // 先用 /api/fs/read 做「工作区边界 + 文件存在 + 大小上限」校验，再走现有 store.openFile
+      const r = await fetch(`/api/fs/read?path=${encodeURIComponent(p)}`);
+      const d = await readJson(r);
+      if (!r.ok) return `错误：${d.error || `打开失败 (${r.status})`}`;
+      await useIde.getState().openFile(p);
+      return useIde.getState().activeFile === p ? `已打开 ${p}` : `错误：打开失败 ${p}`;
+    }
+    return `错误：未知工具 ${name}`;
+  } catch (e) {
+    return `错误：${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+/** 工具分发：前端 IDE 工具走 store，其余沿用工作区文件工具 /api/fs/* */
+export async function runAiTool(name: string, args: ToolArgs): Promise<string> {
+  if (IDE_TOOL_NAMES.has(name)) return runIdeTool(name, args);
+  return runFsTool(name, args);
+}
+
 export interface ChatOutcome {
   message?: { content?: string | null; tool_calls?: ChatToolCall[] };
   error?: string;
@@ -338,6 +499,26 @@ export interface ChatOptions {
    * 不传时行为与以前完全一致（仅内部 30s/120s 超时）。
    */
   signal?: AbortSignal;
+  /**
+   * 当前打开文件上下文（可选）。传入时在本次请求的 messages 最前面追加一条
+   * system 消息（不会写进聊天历史，下一轮会重新按最新值附加）；
+   * 不传时请求体与旧版完全一致。
+   */
+  context?: AiContext;
+}
+
+/**
+ * 把当前文件上下文组装成 system 消息。
+ * 格式：`Current context: file=src/main.cpp`，有选中文本时追加 `<selection>…</selection>`。
+ * 没有 file 时返回 null（等同于不传上下文）。
+ */
+export function contextSystemMessage(context: AiContext | undefined): ChatMessage | null {
+  const file = (context?.file || "").replace(/[\r\n]/g, " ").trim();
+  if (!file) return null;
+  const selection = typeof context?.selection === "string" ? context.selection : "";
+  let content = `Current context: file=${file}`;
+  if (selection.trim()) content += `\n<selection>\n${selection}\n</selection>`;
+  return { role: "system", content };
 }
 
 /**
@@ -349,11 +530,14 @@ export async function requestChat(
   messages: ChatMessage[],
   opts: ChatOptions = {}
 ): Promise<ChatOutcome> {
-  const { tools: useTools = true, temperature = 0.3, timeoutMs = CHAT_TIMEOUT_MS, signal } = opts;
+  const { tools: useTools = true, temperature = 0.3, timeoutMs = CHAT_TIMEOUT_MS, signal, context } = opts;
   const endpoint = resolveAiEndpoint(s);
   if (!endpoint) {
-    return { error: "未配置 AI 接口。请在「设置 → AI 接口」中填写兼容 OpenAI 的接口地址、密钥和模型。" };
+    return { error: t("ai.error.notConfigured") };
   }
+  // 当前文件上下文只作为本次请求的 system 附加消息，不改动调用方的 history
+  const ctxMsg = contextSystemMessage(context);
+  const requestMessages = ctxMsg ? [ctxMsg, ...messages] : messages;
   const ctrl = new AbortController();
   let timedOut = false;
   let canceled = false;
@@ -369,7 +553,7 @@ export async function requestChat(
   if (signal) {
     if (signal.aborted) {
       clearTimeout(timer);
-      return { error: "已取消 AI 请求。" };
+      return { error: t("ai.error.canceled") };
     }
     signal.addEventListener("abort", onCallerAbort);
   }
@@ -385,26 +569,26 @@ export async function requestChat(
         },
         signal: ctrl.signal,
         body: JSON.stringify({
-          ...buildChatBody(s, messages, temperature, false),
-          ...(useTools ? { tools: FS_TOOLS, tool_choice: "auto" } : {}),
+          ...buildChatBody(s, requestMessages, temperature, false),
+          ...(useTools ? { tools: AI_TOOLS, tool_choice: "auto" } : {}),
         }),
       });
       raw = await resp.text();
     } catch (e) {
       if (timedOut) {
-        return { error: `AI 请求超时（${Math.round(timeoutMs / 1000)} 秒）：请检查网络、接口地址与密钥后重试。` };
+        return { error: t("ai.error.timeout", { seconds: Math.round(timeoutMs / 1000) }) };
       }
       // 用户主动取消：用中文说清「不是失败」，调用方据此不再提示错误
-      if (canceled) return { error: "已取消 AI 请求。" };
-      return { error: `AI 请求失败：${e instanceof Error ? e.message : String(e)}` };
+      if (canceled) return { error: t("ai.error.canceled") };
+      return { error: t("ai.error.requestFailed", { message: e instanceof Error ? e.message : String(e) }) };
     }
     if (!resp.ok) {
       // 接口 / 模型不支持 tools 时通常就是 400：给出可操作的中文提示（不带工具的请求无需该提示）
       const hint =
         useTools && (resp.status === 400 || resp.status === 404 || resp.status === 422)
-          ? "\n\n该接口或模型可能不支持工具调用（tools / function calling）。请在「设置 → AI 接口」换用支持工具调用的模型（如 kimi-k2、gpt-4o、claude 系列等），或直接提问（不带工具）继续对话。"
+          ? t("ai.error.toolsUnsupported")
           : "";
-      return { error: `AI 接口返回 ${resp.status}：${raw.slice(0, 400)}${hint}` };
+      return { error: t("ai.error.http", { status: resp.status, body: raw.slice(0, 400), hint }) };
     }
     let data: {
       choices?: { message?: { content?: string | null; tool_calls?: ChatToolCall[] } }[];
@@ -413,14 +597,14 @@ export async function requestChat(
     try {
       data = JSON.parse(raw) as typeof data;
     } catch {
-      return { error: `AI 接口返回了无法解析的内容：${raw.slice(0, 200)}` };
+      return { error: t("ai.error.invalidJson", { body: raw.slice(0, 200) }) };
     }
     if (data.error) {
-      const msg = typeof data.error === "string" ? data.error : data.error.message || "未知错误";
-      return { error: `AI 接口返回错误：${msg}` };
+      const msg = typeof data.error === "string" ? data.error : data.error.message || t("ai.error.unknown");
+      return { error: t("ai.error.apiError", { message: msg }) };
     }
     const message = data.choices?.[0]?.message;
-    if (!message) return { error: "AI 接口返回为空（没有 choices[0].message）" };
+    if (!message) return { error: t("ai.error.empty") };
     return { message };
   } finally {
     clearTimeout(timer);
@@ -436,6 +620,8 @@ export interface ChatLoopOptions {
   onAction?: (actions: string[]) => void;
   maxRounds?: number;
   timeoutMs?: number;
+  /** 当前打开文件上下文（每次请求都作为 system 附加消息，不写入 history） */
+  context?: AiContext;
 }
 
 export interface ChatLoopOutcome {
@@ -453,21 +639,21 @@ export interface ChatLoopOutcome {
  * 直到没有 tool_calls 或达到轮数上限。
  */
 export async function runToolLoop(opts: ChatLoopOptions): Promise<ChatLoopOutcome> {
-  const { settings, history, onAction, maxRounds = MAX_TOOL_ROUNDS, timeoutMs = CHAT_TIMEOUT_MS } = opts;
+  const { settings, history, onAction, maxRounds = MAX_TOOL_ROUNDS, timeoutMs = CHAT_TIMEOUT_MS, context } = opts;
   const actions: string[] = [];
   let finalText = "";
   let error = "";
   let answered = false;
   try {
     for (let round = 0; round < maxRounds; round++) {
-      const out = await requestChat(settings, history, { timeoutMs });
+      const out = await requestChat(settings, history, { timeoutMs, context });
       if (out.error) {
         error = out.error;
         break;
       }
       const msg = out.message;
       if (!msg) {
-        error = "AI 接口返回为空";
+        error = t("ai.error.emptyShort");
         break;
       }
       if (typeof msg.content === "string" && msg.content.trim()) finalText = msg.content;
@@ -490,20 +676,20 @@ export async function runToolLoop(opts: ChatLoopOptions): Promise<ChatLoopOutcom
             parseError = `错误：工具参数不是合法 JSON：${rawArgs.slice(0, 200)}`;
           }
         }
-        actions.push(parseError ? `🔧 ${name}（参数解析失败）` : toolActionLabel(name, args));
+        actions.push(parseError ? `🔧 ${name}${t("ai.action.parseFailed")}` : toolActionLabel(name, args));
         onAction?.([...actions]);
         // 单个工具失败只把错误文本喂回模型，让它自我纠正，不打断整轮对话
-        const result = parseError || (await runFsTool(name, args));
+        const result = parseError || (await runAiTool(name, args));
         history.push({ role: "tool", tool_call_id: call.id || name, content: clipToolResult(result) });
       }
     }
   } catch (e) {
-    error = `AI 请求失败：${e instanceof Error ? e.message : String(e)}`;
+    error = t("ai.error.requestFailed", { message: e instanceof Error ? e.message : String(e) });
   }
   if (!error && !finalText.trim()) {
     finalText = answered
-      ? "(空回复)"
-      : `（已达到 ${maxRounds} 轮工具调用上限，停止继续调用工具。可以让我继续，或把任务拆小一些。）`;
+      ? t("ai.error.emptyReply")
+      : t("ai.error.roundLimit", { max: maxRounds });
   }
   return { text: finalText, actions, error };
 }
