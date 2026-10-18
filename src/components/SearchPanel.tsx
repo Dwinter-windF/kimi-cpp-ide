@@ -12,10 +12,12 @@ import {
 } from "@codemirror/search";
 import type { EditorView } from "@codemirror/view";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
+import { useT } from "@/lib/i18n";
 
 /** 自定义查找替换面板：中文 + --ide-* 主题
  *  （CM 默认面板是英文按钮、硬编码色、位于底部，且层级会盖过设置对话框） */
 export function SearchPanel({ view }: { view: EditorView }) {
+  const t = useT();
   const [q, setQ] = useState(() => {
     const cur = getSearchQuery(view.state);
     return {
@@ -68,41 +70,41 @@ export function SearchPanel({ view }: { view: EditorView }) {
               else findNext(view);
             }
           }}
-          placeholder="查找"
+          placeholder={t("search.find")}
           className={inputCls}
         />
-        <button className={btnCls} title="上一个 (Shift+Enter)" onClick={() => findPrevious(view)}>
+        <button className={btnCls} title={t("search.prev")} onClick={() => findPrevious(view)}>
           <ChevronUp size={13} />
         </button>
-        <button className={btnCls} title="下一个 (Enter)" onClick={() => findNext(view)}>
+        <button className={btnCls} title={t("search.next")} onClick={() => findNext(view)}>
           <ChevronDown size={13} />
         </button>
-        <button className={btnCls} title="选中全部匹配" onClick={() => selectMatches(view)}>
-          全选
+        <button className={btnCls} title={t("search.selectAllTitle")} onClick={() => selectMatches(view)}>
+          {t("search.selectAll")}
         </button>
         <button
           className={optCls(q.caseSensitive)}
-          title="区分大小写"
+          title={t("search.caseSensitive")}
           onClick={() => commit({ caseSensitive: !q.caseSensitive })}
         >
           Aa
         </button>
         <button
           className={optCls(q.regexp)}
-          title="正则表达式"
+          title={t("search.regexp")}
           onClick={() => commit({ regexp: !q.regexp })}
         >
           .*
         </button>
         <button
           className={optCls(q.wholeWord)}
-          title="全词匹配"
+          title={t("search.wholeWord")}
           onClick={() => commit({ wholeWord: !q.wholeWord })}
         >
           ⌷
         </button>
         <div className="flex-1" />
-        <button className={btnCls} title="关闭 (Esc)" onClick={() => closeSearchPanel(view)}>
+        <button className={btnCls} title={t("search.close")} onClick={() => closeSearchPanel(view)}>
           <X size={13} />
         </button>
       </div>
@@ -117,14 +119,14 @@ export function SearchPanel({ view }: { view: EditorView }) {
               replaceNext(view);
             }
           }}
-          placeholder="替换"
+          placeholder={t("search.replace")}
           className={inputCls}
         />
         <button className={btnCls} onClick={() => replaceNext(view)}>
-          替换
+          {t("search.replace")}
         </button>
         <button className={btnCls} onClick={() => replaceAll(view)}>
-          全部替换
+          {t("search.replaceAll")}
         </button>
       </div>
     </div>
