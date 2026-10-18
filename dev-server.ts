@@ -88,6 +88,16 @@ export interface Settings {
   aiModel?: string;
   /** 用户通过「打开目录」选定的工作区绝对路径（持久化，下次启动优先使用） */
   workspacePath?: string;
+  // 字体（可选：旧 settings.json 没有这些字段时由前端按默认值处理）
+  uiFontFamily?: string;
+  uiFontSize?: number;
+  editorFontFamily?: string;
+  editorFontSize?: number;
+  editorTabSize?: number;
+  /** 调试求值控制台门控（可选；缺字段视为 false，开始调试时快照进会话） */
+  evalConsole?: boolean;
+  /** clang-format 可执行文件路径（可选；留空则从 PATH 查找，用于「格式化文档」） */
+  clangFormatPath?: string;
 }
 
 export interface Diagnostic {
@@ -123,6 +133,181 @@ function loadSettings(): Settings {
 function saveSettings(s: Settings) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2), "utf-8");
+}
+
+// ---------------------------------------------------------------------------
+// 系统已安装字体枚举（GET /api/fonts，只读系统信息）
+//
+// 优先读注册表（HKLM + HKCU），注册表不可用/为空时回退扫描字体目录。
+// 返回去重、排序后的字体族名数组；结果缓存 5 分钟，避免重复打开设置框时反复起 reg.exe。
+// ---------------------------------------------------------------------------
+const FONT_REG_KEYS = [
+  "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
+  "HKCU\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
+];
+const FONT_FILE_EXTS = new Set([".ttf", ".otf", ".ttc", ".fon"]);
+const FONT_CACHE_TTL = 5 * 60 * 1000;
+let fontListCache: { at: number; fonts: string[] } | null = null;
+let fontRegSeq = 0;
+
+/**
+ * 执行 `reg query <key>` 并把输出落到 LOCAL_TMP 下的临时文件。
+ * 不用管道捕获 stdout：本机安全软件/受限环境可能禁止子进程管道；
+ * 走文件与 dev-server 里 pickDirectory 的临时文件做法一致，编码也能自己控制。
+ */
+function readRegistryKey(key: string): string | null {
+  const outFile = path.join(LOCAL_TMP, `reg-fonts-${process.pid}-${Date.now()}-${fontRegSeq++}.txt`);
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(outFile, "w");
+    const r = spawnSync("reg.exe", ["query", key], {
+      stdio: ["ignore", fd, fd],
+      timeout: 8000,
+      windowsHide: true,
+    });
+    if (r.error || r.status !== 0) return null;
+    return decodeConsoleOutput(fs.readFileSync(outFile));
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      fs.rmSync(outFile, { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * 从注册表值名提取字体族名：
+ *  - 去掉结尾的 "(TrueType)" / "(OpenType)" 等类型标注；
+ *  - "Microsoft YaHei & Microsoft YaHei UI" 这类合并项按 & 拆开；
+ *  - 去掉 Bold / Italic / Bold Italic 等纯样式后缀（Arial Black / Calibri Light
+ *    本身可能是独立族名，保留不动）；
+ *  - 跳过 @ 开头的竖排字体。
+ */
+function tidyFontNames(raw: string): string[] {
+  return raw
+    .replace(/\s*\((?:TrueType|OpenType|Type 1|All res|VGA res|PostScript)\)\s*$/i, "")
+    .split(/\s*&\s*/)
+    .map((part) => part.trim())
+    .map((part) =>
+      part.replace(/\s+(?:Bold Italic|Bold Oblique|Italic|Bold|Oblique|Regular|Normal)\s*$/i, "").trim()
+    )
+    .filter((part) => part.length > 0 && part.length <= 80 && !part.startsWith("@"));
+}
+
+/** 读两个注册表字体项的原始值名；reg.exe 不存在 / 无权限 / 输出为空都返回空数组 */
+function registryFontNames(): string[] {
+  if (!isWin) return [];
+  const out: string[] = [];
+  for (const key of FONT_REG_KEYS) {
+    try {
+      const text = readRegistryKey(key);
+      if (!text) continue;
+      for (const line of text.split(/\r?\n/)) {
+        // 形如：    Arial (TrueType)    REG_SZ    arial.ttf
+        const m = /^\s+(.+?)\s{4,}REG_SZ\s+/.exec(line);
+        if (m) out.push(...tidyFontNames(m[1]));
+      }
+    } catch {
+      /* ignore：继续尝试下一个注册表项 / 文件扫描兜底 */
+    }
+  }
+  return out;
+}
+
+/** 控制台命令输出解码：优先 UTF-8，出现替换字符时按 GBK / GB18030 / Big5 兜底 */
+function decodeConsoleOutput(buf: Buffer): string {
+  const utf8 = buf.toString("utf-8");
+  if (!utf8.includes("\uFFFD")) return utf8;
+  for (const label of ["gbk", "gb18030", "big5", "windows-1252"]) {
+    try {
+      const text = new TextDecoder(label).decode(buf);
+      if (!text.includes("\uFFFD")) return text;
+    } catch {
+      /* 当前 Node 的 ICU 不支持该编码：继续试下一个 */
+    }
+  }
+  return utf8;
+}
+
+/** 字体文件名 → 常见族名（仅在注册表不可用时兜底，避免只返回 msyh / simsun 这类文件名） */
+const FONT_FILE_ALIASES: Record<string, string> = {
+  msyh: "Microsoft YaHei",
+  msyhbd: "Microsoft YaHei",
+  msyhl: "Microsoft YaHei Light",
+  msyhbd_ui: "Microsoft YaHei UI",
+  msyh_ui: "Microsoft YaHei UI",
+  simsun: "SimSun",
+  nsimsun: "NSimSun",
+  simhei: "SimHei",
+  simkai: "KaiTi",
+  simfang: "FangSong",
+  consola: "Consolas",
+  consolab: "Consolas",
+  consolai: "Consolas",
+  consolaz: "Consolas",
+  segoeui: "Segoe UI",
+  segoeuib: "Segoe UI",
+  segoeuii: "Segoe UI",
+  segoeuil: "Segoe UI Light",
+  cour: "Courier New",
+  arial: "Arial",
+  tahoma: "Tahoma",
+  verdana: "Verdana",
+  calibri: "Calibri",
+  times: "Times New Roman",
+};
+
+/** 回退扫描字体目录里的 .ttf/.otf/.ttc/.fon 文件名 */
+function fileFontNames(): string[] {
+  if (!isWin) return [];
+  const dirs = [
+    path.join(process.env.WINDIR || "C:\\Windows", "Fonts"),
+    path.join(process.env.LOCALAPPDATA || "", "Microsoft", "Windows", "Fonts"),
+  ];
+  const out: string[] = [];
+  for (const dir of dirs) {
+    if (!dir) continue;
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        const ext = path.extname(entry.name).toLowerCase();
+        if (!FONT_FILE_EXTS.has(ext)) continue;
+        const base = path.basename(entry.name, path.extname(entry.name));
+        out.push(FONT_FILE_ALIASES[base.toLowerCase()] || base);
+      }
+    } catch {
+      /* ignore：目录不存在 / 无权限时跳过 */
+    }
+  }
+  return out;
+}
+
+/** 枚举系统字体族名：注册表优先，空结果回退文件扫描；去重 + 排序 + 5 分钟缓存 */
+function listSystemFonts(): string[] {
+  const now = Date.now();
+  if (fontListCache && now - fontListCache.at < FONT_CACHE_TTL) return fontListCache.fonts;
+  let names = registryFontNames();
+  if (names.length === 0) names = fileFontNames();
+  const seen = new Set<string>();
+  const fonts = names.filter((name) => {
+    const key = name.toLocaleLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  fonts.sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
+  fontListCache = { at: now, fonts };
+  return fonts;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +507,165 @@ const FS_WRITE_LIMIT = 2 * 1024 * 1024;
  *    8MB 意味着单次请求峰值内存约 19MB（11MB 请求体 + 8MB 缓冲），可控又不至于被误操作打爆。
  */
 const FS_UPLOAD_LIMIT = 8 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// clang-format 一键格式化
+// ---------------------------------------------------------------------------
+/** clang-format 子进程超时（需求：10 秒） */
+const FORMAT_TIMEOUT_MS = 10_000;
+/** 用户传入的 style 串上限（防止超长参数） */
+const FORMAT_STYLE_MAX = 200;
+/** 格式化输出上限：输入本身限 2MB，输出留一点增长余量但仍防止异常膨胀 */
+const FORMAT_OUTPUT_LIMIT = FS_WRITE_LIMIT * 2;
+let formatSeq = 0;
+
+/**
+ * 从目标文件所在目录向上找 .clang-format / _clang-format（最多找到工作区根目录）。
+ * 有配置文件时用 -style=file，让 clang-format 自己按目录层级解析；
+ * 没有时回退 LLVM（README / 设置页文案同步说明）。
+ */
+function hasClangFormatConfig(absFile: string): boolean {
+  let dir = path.dirname(absFile);
+  for (;;) {
+    try {
+      if (fs.existsSync(path.join(dir, ".clang-format")) || fs.existsSync(path.join(dir, "_clang-format"))) {
+        return true;
+      }
+    } catch {
+      /* ignore */
+    }
+    if (dir === WORKSPACE) break;
+    const parent = path.dirname(dir);
+    if (parent === dir || !dir.startsWith(WORKSPACE + path.sep)) break;
+    dir = parent;
+  }
+  return false;
+}
+
+/** 解析 style：显式传入优先；否则有 .clang-format 用 file，没有用 LLVM */
+function clangFormatStyleFor(absFile: string, requested: unknown): string | null {
+  if (typeof requested === "string" && requested.trim()) {
+    const s = requested.trim();
+    // style 作为单个 argv 传入，不存在命令注入；这里只挡换行/超长等异常输入
+    if (s.length > FORMAT_STYLE_MAX || /[\r\n\0]/.test(s)) return null;
+    return s;
+  }
+  return hasClangFormatConfig(absFile) ? "file" : "LLVM";
+}
+
+interface FormatRunResult {
+  content?: string;
+  style?: string;
+  error?: string;
+  code?: string;
+  status?: number;
+}
+
+/**
+ * 执行 clang-format：stdin 用已打开的原文件 fd，stdout/stderr 重定向到临时文件。
+ * 不用管道捕获输出（本机受限环境可能禁止子进程管道；与 readRegistryKey 的写法一致），
+ * 也不修改原文件 —— 结果原样返回前端，由编辑器单事务替换全文。
+ */
+function runClangFormat(absFile: string, style: string): FormatRunResult {
+  // 解析顺序与 findBuildTool 一致：设置路径 → 已知绝对路径（where 不接受全路径参数，不能走 findOnPath）→ PATH
+  let info = resolveTool(loadSettings().clangFormatPath, []);
+  if (!info.found) {
+    const known = path.join(MSYS2_BIN, "clang-format.exe");
+    if (fs.existsSync(known)) {
+      info = { found: true, path: known, version: versionOf(known), source: "path" };
+    } else {
+      const onPath = findOnPathCached("clang-format");
+      if (onPath) info = { found: true, path: onPath, version: versionOf(onPath), source: "path" };
+    }
+  }
+  if (!info.found || !info.path) {
+    return {
+      error: "未找到 clang-format。请安装 clang-format，或在「设置 → 工具链」中填写其可执行文件路径。",
+      code: "FORMAT_UNAVAILABLE",
+      status: 503,
+    };
+  }
+  const id = `format-${process.pid}-${Date.now()}-${formatSeq++}`;
+  const outFile = path.join(LOCAL_TMP, id + ".out");
+  const errFile = path.join(LOCAL_TMP, id + ".err");
+  let inFd: number | null = null;
+  let outFd: number | null = null;
+  let errFd: number | null = null;
+  try {
+    inFd = fs.openSync(absFile, "r");
+    outFd = fs.openSync(outFile, "w");
+    errFd = fs.openSync(errFile, "w");
+    const args = [`-style=${style}`];
+    if (style === "file") args.push("-fallback-style=LLVM");
+    // -assume-filename 让 clang-format 以真实文件路径判断语言与 .clang-format 层级
+    args.push(`-assume-filename=${absFile}`);
+    const r = spawnSync(info.path, args, {
+      stdio: [inFd, outFd, errFd],
+      timeout: FORMAT_TIMEOUT_MS,
+      windowsHide: true,
+      cwd: path.dirname(absFile),
+      env: toolEnv(info.path),
+    });
+    const stderr = (() => {
+      try {
+        return fs.readFileSync(errFile, "utf-8").trim();
+      } catch {
+        return "";
+      }
+    })();
+    if (r.error) {
+      const timedOut = (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
+      return {
+        error: timedOut
+          ? `clang-format 执行超过 ${FORMAT_TIMEOUT_MS / 1000} 秒，已终止。`
+          : `无法启动 clang-format：${r.error.message}`,
+        code: timedOut ? "FORMAT_TIMEOUT" : "FORMAT_FAILED",
+        status: timedOut ? 504 : 500,
+      };
+    }
+    if (r.status !== 0) {
+      return {
+        error: `clang-format 退出码 ${r.status ?? "?"}${stderr ? `：${stderr.slice(0, 800)}` : ""}`,
+        code: "FORMAT_FAILED",
+        status: 400,
+      };
+    }
+    const outStat = fs.statSync(outFile);
+    if (outStat.size > FORMAT_OUTPUT_LIMIT) {
+      return {
+        error: `格式化输出 ${(outStat.size / 1024 / 1024).toFixed(2)}MB，超过 ${FORMAT_OUTPUT_LIMIT / 1024 / 1024}MB 安全上限`,
+        code: "FORMAT_TOO_LARGE",
+        status: 413,
+      };
+    }
+    const content = fs.readFileSync(outFile, "utf-8");
+    return { content, style };
+  } catch (e) {
+    return {
+      error: `格式化失败：${e instanceof Error ? e.message : String(e)}`,
+      code: "FORMAT_FAILED",
+      status: 500,
+    };
+  } finally {
+    for (const fd of [inFd, outFd, errFd]) {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    for (const f of [outFile, errFile]) {
+      try {
+        fs.rmSync(f, { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
 
 /**
  * 同名文件自动改名：name.cpp → name-1.cpp → name-2.cpp …（最多探测 999 次）。
@@ -1120,8 +1464,9 @@ type ReplyItem =
   | { kind: "locals" }
   | { kind: "frames" }
   | { kind: "http-eval"; expr: string; resolve: (r: { value?: string; error?: string }) => void }
-  // 泛化请求-应答: 可视化等 HTTP 接口发一条 MI 命令并等待其 ^done 负载
-  | { kind: "http-req"; resolve: (r: Record<string, unknown>) => void }
+  // 泛化请求-应答: 可视化等 HTTP 接口发一条 MI 命令并等待其 ^done 负载。
+  // capture 用于 -exec call：GDB 把调用结果打在 ~ 控制台流里，^done 本身不带 value。
+  | { kind: "http-req"; resolve: (r: Record<string, unknown>) => void; capture?: string[] }
   // 发出去就不打算收应答的命令(如 -var-delete), 其 ^done/^error 仅出队丢弃
   | { kind: "ignore" };
 
@@ -1132,10 +1477,17 @@ interface DebugSession {
   started: boolean;
   exited: boolean;
   watch: string[];
+  /** 创建会话时的「求值控制台」门控快照；false 时 /eval 一律 403 */
+  evalConsole: boolean;
+  /** 是否正在运行（-exec-run/-exec-continue 发出后为 true，*stopped 后为 false） */
+  running: boolean;
   replyQueue: ReplyItem[];
   lastStop: { reason: string; file: string; line: number; func: string } | null;
   lastStack: DebugFrame[];
-  /** 可视化请求互斥链: 同一时刻只跑一个 viz 展开, 防止 MI 应答交错 */
+  /**
+   * MI 请求互斥链：可视化展开与求值控制台共用同一条链，
+   * 同一时刻只跑一个 HTTP 触发的多步 MI 交互，防止命令/应答交错。
+   */
   vizChain: Promise<unknown>;
   pendingStop: {
     reason: string;
@@ -1174,15 +1526,101 @@ function evaluateWatch(session: DebugSession) {
   gdbSend(session, "-stack-list-frames");
 }
 
-/** 悬浮求值: 仅在停止状态下可用, 结果通过 HTTP 直接返回 */
-function debugEval(session: DebugSession, expr: string): Promise<{ value?: string; error?: string }> {
+interface DebugEvalResult {
+  ok: boolean;
+  value?: string;
+  error?: string;
+  /** 出错时建议的 HTTP 状态码（403=门控未开；409=非暂停态） */
+  status?: number;
+}
+
+/** 求值门控：仅「会话未退出 + 已暂停 + 没有正在处理的停止事件」时可用 */
+function debugPausedError(session: DebugSession): string | null {
+  if (session.exited) return "调试已结束";
+  if (session.pendingStop || session.running || !session.lastStop) {
+    return "程序未暂停，命中断点后才能求值";
+  }
+  return null;
+}
+
+/**
+ * 发一条 -data-evaluate-expression 并等待 ^done/^error（8s 超时）。
+ * 超时后把队列项移除，避免 HTTP 请求永久挂起；应答队列本身仍是 FIFO。
+ */
+function miEvalExpression(
+  session: DebugSession,
+  expr: string,
+  timeoutMs = 8000
+): Promise<{ value?: string; error?: string }> {
   return new Promise((resolve) => {
-    if (session.exited) return resolve({ error: "调试已结束" });
-    if (session.pendingStop) return resolve({ error: "忙" });
-    if (!session.lastStop) return resolve({ error: "程序正在运行，命中断点后可查看" });
-    session.replyQueue.push({ kind: "http-eval", expr, resolve });
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+    const finish = (r: { value?: string; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(r);
+    };
+    const item: ReplyItem = { kind: "http-eval", expr, resolve: finish };
+    timer = setTimeout(() => {
+      const i = session.replyQueue.indexOf(item);
+      if (i >= 0) session.replyQueue.splice(i, 1);
+      finish({ error: "GDB 应答超时" });
+    }, timeoutMs);
+    session.replyQueue.push(item);
     gdbSend(session, `-data-evaluate-expression ${miQuote(expr)}`);
   });
+}
+
+/**
+ * 求值控制台核心逻辑：
+ *  1. 门控/暂停态双重校验（串行链里会重新校验一次，防止排队期间程序继续运行）；
+ *  2. 优先 -data-evaluate-expression；
+ *  3. 若返回 error 且表达式形如函数调用，fallback -exec call（同样 8s 超时）。
+ */
+async function debugEvalCompute(session: DebugSession, expr: string): Promise<DebugEvalResult> {
+  if (!session.evalConsole) {
+    return { ok: false, status: 403, error: "本次调试会话未开启「求值控制台」（开始调试前勾选后才可求值）" };
+  }
+  const pausedError = debugPausedError(session);
+  if (pausedError) return { ok: false, status: 409, error: pausedError };
+
+  const direct = await miEvalExpression(session, expr, 8000);
+  if (!direct.error) return { ok: true, value: direct.value ?? "" };
+
+  // 函数调用（如 add(1,2)）GDB 的 data-evaluate-expression 可能拒绝，退化为 -exec call。
+  // 注意：部分 GDB 版本没有 -exec call（会回 "Undefined MI command: exec"），
+  // 因此再退一层官方 MI 的 -interpreter-exec console "call …"，并用控制台流取返回值。
+  if (/^\s*[A-Za-z_]\w*\s*\(/.test(expr)) {
+    const call = await miRequest(session, `-exec call ${expr}`, 8000, []);
+    if (!call.error) {
+      const v = call.value;
+      return { ok: true, value: typeof v === "string" ? v : "" };
+    }
+    const consoleCall = await miRequest(
+      session,
+      `-interpreter-exec console ${miQuote(`call ${expr}`)}`,
+      8000,
+      []
+    );
+    if (!consoleCall.error) {
+      const v = consoleCall.value;
+      return { ok: true, value: typeof v === "string" ? v : "" };
+    }
+    return {
+      ok: false,
+      error: `${direct.error}；-exec call 回退失败：${String(call.error)}；console call 也失败：${String(consoleCall.error)}`,
+    };
+  }
+  return { ok: false, error: direct.error };
+}
+
+/** 求值入口：与可视化共用 session.vizChain，保证同一时刻只有一个多步 MI 交互 */
+function debugEval(session: DebugSession, expr: string): Promise<DebugEvalResult> {
+  const run = () => debugEvalCompute(session, expr);
+  const next = session.vizChain.then(run, run);
+  session.vizChain = next;
+  return next;
 }
 
 function flushStop(session: DebugSession) {
@@ -1219,7 +1657,13 @@ function handleDebugLine(session: DebugSession, line: string) {
   if (!line) return;
   if (line.startsWith('~"') || line.startsWith("~\"")) {
     const m = line.match(/^~"(.*)"$/s);
-    if (m) broadcast(session.clients, "console", { text: miUnescape(m[1]) });
+    if (m) {
+      const text = miUnescape(m[1]);
+      broadcast(session.clients, "console", { text });
+      // -exec call 的返回值只在控制台流里，记录到正在等待的 http-req 上
+      const pending = session.replyQueue.find((i) => i.kind === "http-req" && i.capture);
+      if (pending?.kind === "http-req" && pending.capture) pending.capture.push(text);
+    }
     return;
   }
   if (line.startsWith('&"')) {
@@ -1237,10 +1681,13 @@ function handleDebugLine(session: DebugSession, line: string) {
     const reason = r.reason || "stopped";
     if (reason.startsWith("exited")) {
       session.exited = true;
+      session.running = false;
       broadcast(session.clients, "exited", { reason });
       cleanupDebug();
       return;
     }
+    // 命中暂停：从 running 切回 stopped，随后 evaluateWatch 收集变量
+    session.running = false;
     session.pendingStop = {
       reason,
       file: (r.frame?.file || "").split("\\").join("/"),
@@ -1255,6 +1702,8 @@ function handleDebugLine(session: DebugSession, line: string) {
     return;
   }
   if (line.startsWith("*running")) {
+    // 继续执行即离开暂停态：求值控制台随之为不可用，直到下一次 *stopped
+    session.running = true;
     broadcast(session.clients, "running", {});
     return;
   }
@@ -1300,7 +1749,14 @@ function handleDebugLine(session: DebugSession, line: string) {
       return;
     }
     if (item?.kind === "http-req") {
-      item.resolve(r as unknown as Record<string, unknown>);
+      const out = r as unknown as Record<string, unknown>;
+      if (item.capture && item.capture.length > 0) {
+        // 形如 "$1 = 42\n" 的控制台输出 → 取等号后的值；解析不出时原样返回捕获文本
+        const raw = item.capture.join("").trim();
+        const m = raw.match(/^\$\d+\s*=\s*([\s\S]*)$/);
+        out.value = (m ? m[1] : raw).trim();
+      }
+      item.resolve(out);
       return;
     }
     if (item?.kind === "ignore") return; // fire-and-forget 出队丢弃
@@ -1347,7 +1803,12 @@ function cleanupDebug() {
   }
 }
 
-function startDebug(exeRel: string, breakpoints: { file: string; line: number }[], watch: string[]): { id: string } | { error: string } {
+function startDebug(
+  exeRel: string,
+  breakpoints: { file: string; line: number }[],
+  watch: string[],
+  evalConsole = false
+): { id: string } | { error: string } {
   const settings = loadSettings();
   const gdb = resolveTool(settings.gdbPath, ["gdb"]);
   if (!gdb.found || !gdb.path) return { error: "未找到 GDB 调试器。请安装 MinGW-w64/MSYS2 的 gdb，或在设置中指定路径。" };
@@ -1364,6 +1825,9 @@ function startDebug(exeRel: string, breakpoints: { file: string; line: number }[
     started: false,
     exited: false,
     watch,
+    // 门控快照：创建会话时固定，运行中修改设置不影响本会话
+    evalConsole: evalConsole === true,
+    running: false,
     replyQueue: [],
     lastStop: null,
     lastStack: [],
@@ -1389,6 +1853,7 @@ function startDebug(exeRel: string, breakpoints: { file: string; line: number }[
   proc.stderr?.on("data", (d) => broadcast(session.clients, "log", { text: d.toString() }));
   proc.on("close", () => {
     session.exited = true;
+    session.running = false;
     broadcast(session.clients, "exited", { reason: "gdb-end" });
     if (debugSession === session) debugSession = null;
   });
@@ -1410,6 +1875,8 @@ function debugCmd(op: string, watch?: string[]) {
   if (watch) session.watch = watch;
   switch (op) {
     case "run":
+      // 发出执行命令即离开暂停态（*running 可能稍后才到，先标记防止竞态窗口里求值）
+      session.running = true;
       if (!session.started) {
         session.started = true;
         gdbSend(session, "-exec-run");
@@ -1418,15 +1885,19 @@ function debugCmd(op: string, watch?: string[]) {
       }
       break;
     case "continue":
+      session.running = true;
       gdbSend(session, "-exec-continue");
       break;
     case "next":
+      session.running = true;
       gdbSend(session, "-exec-next");
       break;
     case "step":
+      session.running = true;
       gdbSend(session, "-exec-step");
       break;
     case "finish":
+      session.running = true;
       gdbSend(session, "-exec-finish");
       break;
     case "vars": {
@@ -1454,15 +1925,22 @@ function debugCmd(op: string, watch?: string[]) {
 // ---------------------------------------------------------------------------
 // 数据结构可视化: 调试暂停时把 vector / 数组 / 链表展开为结构化 JSON
 // ---------------------------------------------------------------------------
-const VIZ_MAX_ELEMS = 100;      // 数组/vector 最多展示元素数
-const VIZ_MAX_LIST_NODES = 40;  // 链表最多遍历节点数（防失控）
+const VIZ_MAX_ELEMS = 100;      // 数组/vector/map/set 最多展示元素数
+const VIZ_MAX_LIST_NODES = 40;  // 链表 / 二叉树最多遍历节点数（防失控）
+const VIZ_MAX_GRID_CELLS = 100; // 二维表格最多单元格数
 let vizSeq = 0;
 
 /** 发一条 MI 命令并等待其 ^done 负载; 超时兜底防止 HTTP 请求挂死 */
-function miRequest(session: DebugSession, cmd: string, timeoutMs = 8000): Promise<Record<string, unknown>> {
+function miRequest(
+  session: DebugSession,
+  cmd: string,
+  timeoutMs = 8000,
+  capture?: string[]
+): Promise<Record<string, unknown>> {
   return new Promise((resolve) => {
     const item: ReplyItem = {
       kind: "http-req",
+      capture,
       resolve: (r) => {
         clearTimeout(timer);
         resolve(r);
@@ -1478,9 +1956,13 @@ function miRequest(session: DebugSession, cmd: string, timeoutMs = 8000): Promis
   });
 }
 
-/** 类型名规范化: 去空白、去 struct/class 前缀，用于链表 next 指针的同型判定 */
+/** 类型名规范化: 去空白、去 struct/class/const 等前缀，用于链表/二叉树指针同型判定 */
 function normTypeName(t: string): string {
-  return t.replace(/\s+/g, " ").trim().replace(/^(struct|class|union|enum) /, "");
+  return t
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(?:(?:struct|class|union|enum|const|volatile)\s+)+/, "")
+    .trim();
 }
 
 /** 从 GDB 值字符串里抓第一个十六进制地址（指针值的文本形态） */
@@ -1527,6 +2009,468 @@ async function vizFields(session: DebugSession, varName: string, depth = 0): Pro
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// 可视化扩展：std::map / std::set / 二叉树 / 二维数组
+// ---------------------------------------------------------------------------
+
+type VizCreateVar = (e: string) => Promise<Record<string, unknown>>;
+
+/** 内部实现字段（_M_ 开头）一律不渲染给用户 */
+const isInternalMember = (label: string): boolean => /^_M_/.test(label);
+
+/** 带错误码的可视化错误：前端按 code 走 i18n，error 仅作旧客户端 / 日志兜底 */
+function vizError(code: string, error: string): Record<string, unknown> {
+  return { kind: "error", code, error };
+}
+
+/** 从 `[0]` / `0` 这类 exp 里取序号，用于让 std::map/set/数组按容器顺序展示 */
+function vizIndex(exp: string): number | null {
+  const m = /^\s*\[?\s*(\d+)\s*\]?\s*$/.exec(exp);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function sortByVizIndex(kids: VizChild[]): VizChild[] | null {
+  const indexed = kids.map((k) => vizIndex(k.exp));
+  if (indexed.some((n) => n === null)) return null;
+  return kids
+    .map((k, i) => ({ k, i, n: indexed[i] as number }))
+    .sort((a, b) => a.n - b.n || a.i - b.i)
+    .map((x) => x.k);
+}
+
+/** 在顶层逗号处切分 pair 文本（忽略字符串与嵌套 {}/[]/() 内的逗号） */
+function splitTopLevelCommas(text: string): string[] {
+  let s = text.trim();
+  if (s.startsWith("{") && s.endsWith("}")) s = s.slice(1, -1);
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "{" || ch === "[" || ch === "(") depth++;
+    else if (ch === "}" || ch === "]" || ch === ")") depth = Math.max(0, depth - 1);
+    else if (ch === "," && depth === 0) {
+      parts.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
+/**
+ * 解析 GDB pretty-printer 给出的 std::pair 文本：
+ *   {first = 1, second = "one"}
+ * 也兼容 `{1 = "one"}`（部分打印器会省略 first/second 字段名）。
+ */
+function parsePairText(text: string): { key: string; value: string } | null {
+  if (!text || !text.trim()) return null;
+  let key: string | undefined;
+  let value: string | undefined;
+  for (const part of splitTopLevelCommas(text)) {
+    const first = /^\s*first\s*=\s*([\s\S]*?)\s*$/.exec(part);
+    if (first) {
+      key = first[1].trim();
+      continue;
+    }
+    const second = /^\s*second\s*=\s*([\s\S]*?)\s*$/.exec(part);
+    if (second) {
+      value = second[1].trim();
+    }
+  }
+  if (key !== undefined && value !== undefined) return { key, value };
+  // 兜底：`{1 = "one"}` 直接按顶层 `=` 拆
+  let s = text.trim();
+  if (s.startsWith("{") && s.endsWith("}")) s = s.slice(1, -1).trim();
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if ("{[(".includes(ch)) depth++;
+    else if ("}])".includes(ch)) depth = Math.max(0, depth - 1);
+    else if (ch === "=" && depth === 0) {
+      const k = s.slice(0, i).trim();
+      const v = s.slice(i + 1).trim();
+      if (k && v) return { key: k, value: v };
+    }
+  }
+  return null;
+}
+
+interface VizTableEntry {
+  key?: string;
+  value: string;
+  type?: string;
+}
+
+/**
+ * std::map / std::set：依赖 pretty-printer 的第一层子节点（map 为 std::pair）。
+ * 返回 null 表示输出不是可识别的打印器形态（调用方给「暂不支持图形化」提示），
+ * 绝不把 _M_t / _Rb_tree 之类内部字段当成元素渲染。
+ */
+async function vizContainerEntries(
+  session: DebugSession,
+  kids: VizChild[],
+  isMap: boolean,
+  rootNum: number
+): Promise<{ entries: VizTableEntry[]; total: number; truncated: boolean } | null> {
+  if (kids.length === 0) return { entries: [], total: rootNum || 0, truncated: false };
+  // 无 pretty-printer：第一层只剩 _M_t / _M_impl / _Rb_tree 内部成员
+  if (kids.some((k) => isInternalMember(k.exp) || /(^|::)_Rb_tree|_M_impl\b|_M_t\b/.test(k.type))) {
+    return null;
+  }
+  const sorted = sortByVizIndex(kids);
+  if (!sorted) return null;
+  const shown = sorted.slice(0, VIZ_MAX_ELEMS);
+  const entries: VizTableEntry[] = [];
+  for (const k of shown) {
+    if (isMap) {
+      let kv = parsePairText(k.value ?? "");
+      if (!kv) {
+        // 打印器对 pair 的 value 处理有差异时，退一步读 pair 的 first/second 子对象
+        try {
+          const pairFields = await vizFields(session, k.name);
+          const kf = pairFields.find((f) => f.exp === "first");
+          const vf = pairFields.find((f) => f.exp === "second");
+          if (kf || vf) kv = { key: kf?.value ?? "", value: vf?.value ?? "?" };
+        } catch {
+          /* 下方统一按解析失败处理 */
+        }
+      }
+      if (!kv) return null;
+      entries.push({ key: kv.key, value: kv.value, type: k.type });
+    } else {
+      const value = k.value ?? (k.numchild > 0 ? null : k.exp);
+      if (value === null || value === undefined) return null;
+      entries.push({ value, type: k.type });
+    }
+  }
+  return { entries, total: rootNum || kids.length, truncated: kids.length > VIZ_MAX_ELEMS };
+}
+
+/** 指针成员是否指向本节点类型（与 vizWalkList 的 next 判定同一套类型规范化） */
+function isSelfPointer(k: VizChild, pointee: string): boolean {
+  return /\*\s*$/.test(k.type) && normTypeName(k.type.replace(/\*\s*$/, "")) === pointee;
+}
+
+/** 字段名 → 左/右子树语义（left/leftChild/left_child/l/lchild/lc…，右同理） */
+function treeSideOf(exp: string): "left" | "right" | null {
+  const compact = exp.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const left = new Set([
+    "left", "leftchild", "leftnode", "leftptr", "leftpointer", "lefttree",
+    "lchild", "lnode", "lptr", "ltree", "llink", "lch", "lson", "l", "lc",
+  ]);
+  const right = new Set([
+    "right", "rightchild", "rightnode", "rightptr", "rightpointer", "righttree",
+    "rchild", "rnode", "rptr", "rtree", "rlink", "rch", "rson", "r", "rc",
+  ]);
+  if (left.has(compact)) return "left";
+  if (right.has(compact)) return "right";
+  // m_left / m_right 这类成员名
+  if (compact.startsWith("m")) {
+    if (left.has(compact.slice(1))) return "left";
+    if (right.has(compact.slice(1))) return "right";
+  }
+  return null;
+}
+
+function treeCandidate(fields: VizChild[], pointee: string) {
+  const selfPtrs = fields.filter((k) => isSelfPointer(k, pointee));
+  return {
+    left: selfPtrs.find((k) => treeSideOf(k.exp) === "left"),
+    right: selfPtrs.find((k) => treeSideOf(k.exp) === "right"),
+    selfPtrs,
+  };
+}
+
+/**
+ * 找不到完整 left/right 时是否值得提示「已回退」：
+ *  - 只找到一个 left/right 命名指针（典型的手写树漏了另一个分支）；
+ *  - 有两个以上自指指针，但名字不是 prev/next/parent 这类链表/图语义。
+ * 普通单链表（只有 next）与双向链表（prev/next）不会被打上提示。
+ */
+function treeFallbackHint(fields: VizChild[], pointee: string): boolean {
+  const { left, right, selfPtrs } = treeCandidate(fields, pointee);
+  if (left || right) return true;
+  if (selfPtrs.length < 2) return false;
+  const linked = selfPtrs.some((k) => {
+    const n = k.exp.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return /^(prev|parent|back|next|random|other)/.test(n);
+  });
+  return !linked;
+}
+
+/** 树节点上用于显示的值：优先 val/value/data/key/id/name，否则第一个非指针标量 */
+function treeNodeLabel(fields: VizChild[]): string {
+  const scalars = fields.filter((k) => !/\*\s*$/.test(k.type) && !isInternalMember(k.exp));
+  if (scalars.length === 0) return "?";
+  const preferred = scalars.find((k) =>
+    /^(val|value|data|key|id|name)$/i.test(k.exp.replace(/^m_/i, ""))
+  );
+  const hit = preferred ?? scalars[0];
+  return (hit.value ?? "?").trim() || "?";
+}
+
+interface VizTreeOutNode {
+  id: string;
+  addr?: string;
+  label: string;
+  fields: { label: string; value: string; type?: string }[];
+  left: string | null;
+  right: string | null;
+}
+
+/**
+ * 二叉树遍历：按「指向自身类型且名字含 left/right 语义」的两个指针成员建立左右子树。
+ * 地址去重防环；节点上限沿用 VIZ_MAX_LIST_NODES(40)。
+ * 子节点统一用 `(T *)地址` 取字段，既能从指针根也能从值根（TreeNode root）出发。
+ */
+async function vizBuildTree(
+  session: DebugSession,
+  createVar: VizCreateVar,
+  rootFields: VizChild[],
+  rootAddr: string | null,
+  pointee: string,
+  expr: string,
+  rootType: string
+): Promise<Record<string, unknown>> {
+  const rootId = rootAddr ?? "root";
+  const byId = new Map<string, VizTreeOutNode>();
+  const order: VizTreeOutNode[] = [];
+  const queue: { node: VizTreeOutNode; fields?: VizChild[] }[] = [];
+  let cycle = false;
+  let truncated = false;
+
+  const makeNode = (id: string, addr: string | undefined, fields?: VizChild[]): VizTreeOutNode => {
+    const node: VizTreeOutNode = { id, addr, label: "…", fields: [], left: null, right: null };
+    byId.set(id, node);
+    order.push(node);
+    queue.push({ node, fields });
+    return node;
+  };
+
+  const ensureChild = (addr: string): string | null => {
+    const id = addr.toLowerCase();
+    if (byId.has(id)) {
+      cycle = true; // 回边 / 重复引用：画到已有节点即可，不再展开
+      return id;
+    }
+    if (order.length >= VIZ_MAX_LIST_NODES) {
+      truncated = true;
+      return null;
+    }
+    makeNode(id, id);
+    return id;
+  };
+
+  const readNodeFields = async (node: VizTreeOutNode): Promise<VizChild[] | null> => {
+    if (!node.addr) return null;
+    try {
+      const v = await createVar(`(${pointee} *)${node.addr}`);
+      return await vizFields(session, String(v.name));
+    } catch {
+      return null;
+    }
+  };
+
+  makeNode(rootId, rootAddr ?? undefined, rootFields);
+  while (queue.length > 0) {
+    const item = queue.shift()!;
+    let fields = item.fields;
+    if (!fields) {
+      const loaded = await readNodeFields(item.node);
+      if (!loaded) {
+        item.node.label = "?";
+        continue;
+      }
+      fields = loaded;
+    }
+    item.node.fields = fields
+      .filter((k) => !isInternalMember(k.exp))
+      .map((k) => ({ label: k.exp, value: k.value ?? (k.numchild > 0 ? "{…}" : "?"), type: k.type }));
+    item.node.label = treeNodeLabel(fields);
+    const cand = treeCandidate(fields, pointee);
+    const leftAddr = parseAddr(cand.left?.value ?? "");
+    const rightAddr = parseAddr(cand.right?.value ?? "");
+    item.node.left = isNullAddr(leftAddr) ? null : ensureChild(leftAddr as string);
+    item.node.right = isNullAddr(rightAddr) ? null : ensureChild(rightAddr as string);
+  }
+
+  return {
+    kind: "tree",
+    expr,
+    type: rootType,
+    tree: { root: rootId, nodes: order, cycle, truncated },
+    total: order.length,
+    truncated,
+    cycle,
+  };
+}
+
+/** 指针根：先按树试读根节点；不是树时返回字段与是否值得提示回退，交给现有链表逻辑 */
+async function vizTryTree(
+  session: DebugSession,
+  createVar: VizCreateVar,
+  expr: string,
+  rootType: string,
+  rootValue: string
+): Promise<{ viz: Record<string, unknown> | null; fallbackHint: boolean }> {
+  const pointee = normTypeName(rootType.replace(/\*\s*$/, ""));
+  let fields: VizChild[];
+  try {
+    const v = await createVar(`*(${expr})`);
+    fields = await vizFields(session, String(v.name));
+  } catch {
+    return { viz: null, fallbackHint: false };
+  }
+  const cand = treeCandidate(fields, pointee);
+  if (cand.left && cand.right) {
+    return {
+      viz: await vizBuildTree(session, createVar, fields, parseAddr(rootValue), pointee, expr, rootType),
+      fallbackHint: false,
+    };
+  }
+  return { viz: null, fallbackHint: treeFallbackHint(fields, pointee) };
+}
+
+/** 二维数组 T arr[R][C]：第一层是行，逐行取第二层；超过 100 个单元格截断 */
+async function vizGrid2DArray(
+  session: DebugSession,
+  expr: string,
+  rootType: string,
+  rootName: string,
+  dims: number[]
+): Promise<Record<string, unknown> | null> {
+  let rowKids: VizChild[];
+  try {
+    rowKids = await vizFields(session, rootName);
+  } catch {
+    return null;
+  }
+  if (rowKids.length === 0 && (dims[0] ?? 0) > 0) return null;
+  const sortedRows = sortByVizIndex(rowKids);
+  if (!sortedRows) return null;
+  const rows: { label: string; cells: { label: string; value: string; type?: string }[] }[] = [];
+  let cells = 0;
+  let truncated = false;
+  for (const rk of sortedRows) {
+    if (cells >= VIZ_MAX_GRID_CELLS) {
+      truncated = true;
+      break;
+    }
+    let rowCells: VizChild[];
+    try {
+      rowCells = await vizChildren(session, rk.name);
+    } catch {
+      return null;
+    }
+    if (rowCells.length === 0 && rk.numchild > 0) return null;
+    const sortedCells = sortByVizIndex(rowCells);
+    if (!sortedCells) return null;
+    const take = sortedCells.slice(0, VIZ_MAX_GRID_CELLS - cells);
+    if (take.length < sortedCells.length) truncated = true;
+    rows.push({
+      label: rk.exp.trim().replace(/^\[|\]$/g, "") || String(rows.length),
+      cells: take.map((c, i) => ({
+        label: c.exp.trim().replace(/^\[|\]$/g, "") || String(cells + i),
+        value: c.value ?? (c.numchild > 0 ? "{…}" : "?"),
+        type: c.type,
+      })),
+    });
+    cells += take.length;
+  }
+  const expectedCols = dims[dims.length - 1] ?? 0;
+  const cols = Math.max(expectedCols, ...rows.map((r) => r.cells.length), 0);
+  return {
+    kind: "grid",
+    expr,
+    type: rootType,
+    grid: { rows, cols },
+    total: (dims[0] ?? 0) * (dims[1] ?? 0),
+    truncated,
+    note: truncated ? "gridTruncated" : undefined,
+  };
+}
+
+/** vector<vector<T>>：顶层是行，行内再取一层；异常形态返回 null 由调用方给明确提示 */
+async function vizGridVector(
+  session: DebugSession,
+  expr: string,
+  rootType: string,
+  rootName: string
+): Promise<Record<string, unknown> | null> {
+  let topKids: VizChild[];
+  try {
+    topKids = await vizChildren(session, rootName);
+  } catch {
+    return null;
+  }
+  if (topKids.length === 0) {
+    return { kind: "grid", expr, type: rootType, grid: { rows: [], cols: 0 }, total: 0, truncated: false };
+  }
+  if (topKids.some((k) => isInternalMember(k.exp))) return null;
+  const sortedRows = sortByVizIndex(topKids);
+  if (!sortedRows) return null;
+  const rows: { label: string; cells: { label: string; value: string; type?: string }[] }[] = [];
+  let cells = 0;
+  let truncated = false;
+  for (const rk of sortedRows) {
+    if (cells >= VIZ_MAX_GRID_CELLS) {
+      truncated = true;
+      break;
+    }
+    let rowCells: VizChild[];
+    try {
+      rowCells = await vizChildren(session, rk.name);
+    } catch {
+      return null;
+    }
+    if (rowCells.length > 0 && sortByVizIndex(rowCells) === null) return null;
+    const sortedCells = sortByVizIndex(rowCells);
+    if (!sortedCells) return null;
+    const take = sortedCells.slice(0, VIZ_MAX_GRID_CELLS - cells);
+    if (take.length < sortedCells.length) truncated = true;
+    rows.push({
+      label: rk.exp.trim().replace(/^\[|\]$/g, "") || String(rows.length),
+      cells: take.map((c) => ({
+        label: c.exp.trim().replace(/^\[|\]$/g, ""),
+        value: c.value ?? (c.numchild > 0 ? "{…}" : "?"),
+        type: c.type,
+      })),
+    });
+    cells += take.length;
+  }
+  const cols = Math.max(...rows.map((r) => r.cells.length), 0);
+  return {
+    kind: "grid",
+    expr,
+    type: rootType,
+    grid: { rows, cols },
+    total: cells,
+    truncated,
+    note: truncated ? "gridTruncated" : undefined,
+  };
+}
+
 
 /** 取模板串顶层第一个逗号前的部分: "int, std::allocator<int>" → "int" */
 function splitTopComma(s: string): string {
@@ -1615,7 +2559,9 @@ async function vizWalkList(
       if (nodes.length === 0) throw e; // 第一个节点就读失败 → 整体报错
       break; // 后续节点读失败（如内存损坏）→ 画到已读到的部分
     }
-    const fields = kids.map((k) => ({ label: k.exp, value: k.value ?? "", type: k.type }));
+    const fields = kids
+      .filter((k) => !isInternalMember(k.exp))
+      .map((k) => ({ label: k.exp, value: k.value ?? "", type: k.type }));
     if (kids.length === 0) {
       if (nodes.length === 0) {
         // 指向非结构体（如 char*）：退回标量，显示所指值
@@ -1640,8 +2586,11 @@ async function vizWalkList(
   return { kind: "list", expr, type: rootType, nodes, truncated, cycle };
 }
 
-/** 可视化主逻辑：判定形态（链表/容器/结构体/标量）并展开一层或逐节点数据 */
-async function debugVizCompute(session: DebugSession, expr: string): Promise<Record<string, unknown>> {
+/**
+ * 可视化主逻辑：判定形态（链表/树/容器/结构体/标量）并展开一层或逐节点数据。
+ * 导出供本地诊断 / 测试直接以伪造的 MI 会话驱动；HTTP 入口仍走 debugViz。
+ */
+export async function debugVizCompute(session: DebugSession, expr: string): Promise<Record<string, unknown>> {
   if (session.exited) return { kind: "error", error: "调试已结束" };
   if (session.pendingStop) return { kind: "error", error: "忙" };
   if (!session.lastStop) return { kind: "error", error: "程序正在运行，命中断点后可查看" };
@@ -1660,15 +2609,73 @@ async function debugVizCompute(session: DebugSession, expr: string): Promise<Rec
     const rootNum = parseInt(String(root.numchild ?? "0"), 10) || 0;
     const rootValue = String(root.value ?? "");
 
-    // 指针类型：按链表尝试逐节点遍历
+    // 指针类型：先按「left/right 两个自指指针」试建二叉树，再回退现有链表遍历
     if (/\*\s*$/.test(rootType)) {
       if (isNullAddr(parseAddr(rootValue))) return { kind: "scalar", expr, type: rootType, value: rootValue || "nullptr" };
-      return await vizWalkList(session, createVar, expr, rootType, rootValue);
+      const treeTry = await vizTryTree(session, createVar, expr, rootType, rootValue);
+      if (treeTry.viz) return treeTry.viz;
+      const list = await vizWalkList(session, createVar, expr, rootType, rootValue);
+      // 找不到完整 left/right 时回退既有链表/结构体视图，并给出明确提示（不影响普通链表）
+      if (treeTry.fallbackHint && (list.kind === "list" || list.kind === "struct")) {
+        return { ...list, note: "treeFallback" };
+      }
+      return list;
+    }
+
+    // std::map / std::set：依赖 pretty-printer 的第一层子节点；内部实现形态给明确提示
+    const isMap = /(?:^|[:\s])map\s*</.test(rootType);
+    const isSet = /(?:^|[:\s])set\s*</.test(rootType);
+    if (isMap || isSet) {
+      let kids: VizChild[] = [];
+      try {
+        kids = await vizChildren(session, rootName);
+      } catch {
+        return vizError(
+          isMap ? "VIZ_MAP_UNSUPPORTED" : "VIZ_SET_UNSUPPORTED",
+          "此结构暂不支持图形化（读取子节点失败，已隐藏内部实现字段）"
+        );
+      }
+      if (kids.length === 0 && rootNum > 0) {
+        return vizError(
+          isMap ? "VIZ_MAP_UNSUPPORTED" : "VIZ_SET_UNSUPPORTED",
+          "此结构暂不支持图形化（未识别到 pretty-printer 输出，已隐藏内部实现字段）"
+        );
+      }
+      const parsed = await vizContainerEntries(session, kids, isMap, rootNum);
+      if (!parsed) {
+        return vizError(
+          isMap ? "VIZ_MAP_UNSUPPORTED" : "VIZ_SET_UNSUPPORTED",
+          "此结构暂不支持图形化（未识别到 pretty-printer 输出，已隐藏内部实现字段）"
+        );
+      }
+      return {
+        kind: isMap ? "map" : "set",
+        expr,
+        type: rootType,
+        entries: parsed.entries,
+        total: parsed.total,
+        truncated: parsed.truncated,
+        note: isMap ? "mapRedBlackTree" : "setRedBlackTree",
+      };
+    }
+
+    // 二维数组 T arr[R][C]：类型形如 int [R][C]
+    const dims = [...rootType.matchAll(/\[\s*(\d+)\s*\]/g)].map((m) => parseInt(m[1], 10));
+    if (dims.length === 2 && /\]\s*\[/.test(rootType)) {
+      const grid = await vizGrid2DArray(session, expr, rootType, rootName, dims);
+      if (grid) return grid;
+      return vizError("VIZ_GRID_UNSUPPORTED", "此二维数组暂不支持图形化（无法读取行列子元素）");
     }
 
     // std::vector：pretty-printer 生效时 varobject 是动态的，numchild 可能报 0、值是摘要串，
     // 但仍应尝试取子元素；子元素 exp 形如 "[0]"（打印器）或 "0"（原始）
     const isVector = /(?:^|[:\s])vector\s*</.test(rootType);
+    const isVectorOfVector = isVector && /vector\s*<\s*(?:std\s*::\s*)?vector\s*</.test(rootType);
+    if (isVectorOfVector) {
+      const grid = await vizGridVector(session, expr, rootType, rootName);
+      if (grid) return grid;
+      return vizError("VIZ_GRID_UNSUPPORTED", "此二维数组暂不支持图形化（vector<vector> 未能展开为行列）");
+    }
     if (isVector) {
       let kids: VizChild[] = [];
       try {
@@ -1691,22 +2698,40 @@ async function debugVizCompute(session: DebugSession, expr: string): Promise<Rec
       // 子元素不是索引形态（pretty-printer 缺失，只剩内部成员）→ 纯内存读取兜底
       const raw = await vizVectorRaw(session, expr, rootType, kids);
       if (raw) return raw;
-      if (kids.length > 0) {
+      const clean = kids.filter((k) => !isInternalMember(k.exp));
+      if (clean.length > 0) {
         return {
           kind: "struct",
           expr,
           type: rootType,
-          elems: kids.slice(0, VIZ_MAX_ELEMS).map((k) => ({ label: k.exp, value: k.value ?? (k.numchild > 0 ? "{…}" : "?"), type: k.type })),
-          total: kids.length,
-          truncated: kids.length > VIZ_MAX_ELEMS,
+          elems: clean.slice(0, VIZ_MAX_ELEMS).map((k) => ({ label: k.exp, value: k.value ?? (k.numchild > 0 ? "{…}" : "?"), type: k.type })),
+          total: clean.length,
+          truncated: clean.length > VIZ_MAX_ELEMS,
         };
+      }
+      if (kids.length > 0) {
+        return vizError("VIZ_VECTOR_UNSUPPORTED", "此 vector 暂不支持图形化（未识别到 pretty-printer 输出）");
       }
       return { kind: "scalar", expr, type: rootType, value: rootValue || "?" };
     }
     if (rootNum === 0) return { kind: "scalar", expr, type: rootType, value: rootValue || "?" };
 
     // 数组 / 结构体：取一层子元素（结构体先拍平访问限定伪节点）
-    const kids = await vizFields(session, rootName);
+    const rawKids = await vizFields(session, rootName);
+    const kids = rawKids.filter((k) => !isInternalMember(k.exp));
+    if (kids.length === 0 && rawKids.length > 0) {
+      return vizError("VIZ_UNSUPPORTED_STRUCT", "此结构暂不支持图形化（仅检测到内部实现字段，已全部隐藏）");
+    }
+
+    // 值形态的手写二叉树（TreeNode root，而不是 TreeNode* root）
+    const pointee = normTypeName(rootType);
+    const cand = treeCandidate(kids, pointee);
+    if (cand.left && cand.right) {
+      const addrR = await miRequest(session, `-data-evaluate-expression ${miQuote(`&(${expr})`)}`);
+      const rootAddr = addrR.error ? null : parseAddr(String(addrR.value ?? ""));
+      return await vizBuildTree(session, createVar, kids, rootAddr, pointee, expr, rootType);
+    }
+
     let truncated = false;
     let elems = kids;
     if (elems.length > VIZ_MAX_ELEMS) {
@@ -1721,7 +2746,8 @@ async function debugVizCompute(session: DebugSession, expr: string): Promise<Rec
     const numericExps = mapped.length > 0 && mapped.every((e2) => /^\d+$/.test(e2.label));
     const isArray = /\[\s*\d+\s*\]\s*$/.test(rootType);
     const kind = isArray || numericExps ? "array" : "struct";
-    return { kind, expr, type: rootType, elems: mapped, total: rootNum || kids.length, truncated };
+    const note = treeFallbackHint(kids, pointee) ? "treeFallback" : undefined;
+    return { kind, expr, type: rootType, elems: mapped, total: rootNum || kids.length, truncated, note };
   } catch (e) {
     return { kind: "error", error: e instanceof Error ? e.message : String(e) };
   }
@@ -1742,6 +2768,29 @@ function debugViz(session: DebugSession, expr: string): Promise<Record<string, u
 // ---------------------------------------------------------------------------
 // AI 代理
 // ---------------------------------------------------------------------------
+
+/**
+ * 当前打开文件上下文 → system 附加消息（可选字段，不传时聊天行为与旧版一致）。
+ * 前端已把选区截到 2KB，这里再按 UTF-8 字节兜底一次，避免第三方调用绕过限制。
+ */
+function contextSystemMessage(context?: {
+  file?: string;
+  selection?: string;
+}): { role: "system"; content: string } | null {
+  const file = (context?.file || "").replace(/[\r\n]/g, " ").trim().slice(0, 500);
+  if (!file) return null;
+  let selection = typeof context?.selection === "string" ? context.selection : "";
+  if (Buffer.byteLength(selection, "utf-8") > 2048) {
+    selection = Buffer.from(selection, "utf-8")
+      .subarray(0, 2048)
+      .toString("utf-8")
+      .replace(/\uFFFD+$/, "");
+  }
+  let content = `Current context: file=${file}`;
+  if (selection.trim()) content += `\n<selection>\n${selection}\n</selection>`;
+  return { role: "system", content };
+}
+
 async function aiChat(messages: { role: string; content: string }[]): Promise<unknown> {
   const s = loadSettings();
   if (!s.aiEndpoint || !s.aiKey) {
@@ -1792,6 +2841,16 @@ export async function handleApiRequest(req: http.IncomingMessage, res: http.Serv
                 cc: resolveTool(s.compilerC, ["gcc", "clang", "clang-cl"]),
                 cxx: resolveTool(s.compilerCpp, ["g++", "clang++"]),
                 gdb: resolveTool(s.gdbPath, ["gdb"]),
+                // 纯新增字段：旧前端忽略即可；格式化入口 / 工具链状态用
+                // where 不接受全路径参数，已知绝对路径须用 existsSync 判（与 runClangFormat 同序）
+                clangFormat: (() => {
+                  const r = resolveTool(s.clangFormatPath, ["clang-format"]);
+                  if (r.found) return r;
+                  const known = path.join(MSYS2_BIN, "clang-format.exe");
+                  return fs.existsSync(known)
+                    ? { found: true, path: known, version: versionOf(known), source: "path" as const }
+                    : r;
+                })(),
               });
               return;
             }
@@ -1806,6 +2865,11 @@ export async function handleApiRequest(req: http.IncomingMessage, res: http.Serv
               const merged = { ...cur, ...body };
               saveSettings(merged);
               json(res, 200, merged);
+              return;
+            }
+            // ---- 系统字体枚举（设置对话框的字体选择器用；只读系统信息，无工作区写入）----
+            if (route === "/api/fonts" && method === "GET") {
+              json(res, 200, listSystemFonts());
               return;
             }
             // ---- 构建系统探测（CMake / Make / 单文件 g++）----
@@ -1908,6 +2972,63 @@ export async function handleApiRequest(req: http.IncomingMessage, res: http.Serv
               }
               fs.rmSync(p, { recursive: true, force: true });
               json(res, 200, { ok: true });
+              return;
+            }
+            // ---- clang-format 一键格式化（纯新增）----
+            // 只读工作区内文件并返回格式化全文，不写盘；前端负责单事务替换编辑器内容。
+            // 文件上限沿用 fs 写的 2MB；执行超时 10s；clang-format 不可用时返回明确错误码。
+            if (route === "/api/format" && method === "POST") {
+              const body = (await readBody(req)) as { file?: unknown; style?: unknown };
+              const raw = typeof body.file === "string" ? body.file.trim() : "";
+              if (!raw) {
+                json(res, 400, { error: "缺少 file 参数", code: "FORMAT_NO_FILE" });
+                return;
+              }
+              const p = toAbs(raw);
+              if (!p) {
+                json(res, 403, { error: fsOutOfRange(raw).error, code: "FORMAT_INVALID_PATH" });
+                return;
+              }
+              let st: fs.Stats | null = null;
+              try {
+                st = fs.statSync(p);
+              } catch {
+                st = null;
+              }
+              if (!st || !st.isFile()) {
+                json(res, 404, { error: `文件不存在：${raw}`, code: "FORMAT_NO_FILE" });
+                return;
+              }
+              if (st.size > FS_WRITE_LIMIT) {
+                json(res, 413, {
+                  error: `文件 ${(st.size / 1024 / 1024).toFixed(2)}MB 超过 ${FS_WRITE_LIMIT / 1024 / 1024}MB 格式化上限`,
+                  code: "FORMAT_TOO_LARGE",
+                });
+                return;
+              }
+              const style = clangFormatStyleFor(p, body.style);
+              if (!style) {
+                json(res, 400, { error: "style 参数不合法（不能包含换行，且不超过 200 字符）", code: "FORMAT_BAD_STYLE" });
+                return;
+              }
+              const r = runClangFormat(p, style);
+              if (r.error) {
+                json(res, r.status ?? 500, { error: r.error, code: r.code ?? "FORMAT_FAILED" });
+                return;
+              }
+              const content = r.content ?? "";
+              if (!content && st.size > 0) {
+                // 防止 clang-format 异常输出空内容时前端把文件清空
+                json(res, 502, { error: "clang-format 返回了空内容，已放弃本次格式化", code: "FORMAT_EMPTY" });
+                return;
+              }
+              json(res, 200, {
+                ok: true,
+                path: toRel(p),
+                content,
+                style: r.style,
+                bytes: Buffer.byteLength(content, "utf-8"),
+              });
               return;
             }
             // ---- 工作区文件 API（供 AI 助手工具调用）----
@@ -2193,8 +3314,14 @@ export async function handleApiRequest(req: http.IncomingMessage, res: http.Serv
                 exe: string;
                 breakpoints: { file: string; line: number }[];
                 watch: string[];
+                evalConsole?: boolean;
               };
-              const result = startDebug(body.exe, body.breakpoints || [], body.watch || []);
+              const result = startDebug(
+                body.exe,
+                body.breakpoints || [],
+                body.watch || [],
+                body.evalConsole === true
+              );
               if ("error" in result) json(res, 400, result);
               else json(res, 200, result);
               return;
@@ -2207,17 +3334,33 @@ export async function handleApiRequest(req: http.IncomingMessage, res: http.Serv
                 json(res, 404, { error: "调试会话不存在（可能已退出）" });
                 return;
               }
-              // 悬浮求值: 等待 GDB 应答后直接以 JSON 返回
+              // 求值控制台: 仅当会话创建时 evalConsole=true 且当前处于暂停态才执行；
+              // 否则 403（门控未开）/ 409（非暂停态），等待 GDB 应答后以 {ok,value?,error?} 返回
               if (parts[4] === "eval") {
-                const body = (await readBody(req)) as { expr?: string };
-                const expr = (body.expr || "").trim();
+                const body = (await readBody(req)) as { expr?: unknown };
+                const expr = typeof body.expr === "string" ? body.expr.trim() : "";
                 if (!expr) {
-                  json(res, 400, { error: "空表达式" });
+                  json(res, 400, { ok: false, error: "空表达式" });
+                  return;
+                }
+                if (expr.length > 500) {
+                  json(res, 400, { ok: false, error: "表达式超过 500 字符上限" });
+                  return;
+                }
+                if (!debugSession.evalConsole) {
+                  json(res, 403, {
+                    ok: false,
+                    error: "本次调试会话未开启「求值控制台」（开始调试前勾选后才可求值）",
+                  });
+                  return;
+                }
+                const pausedError = debugPausedError(debugSession);
+                if (pausedError) {
+                  json(res, 409, { ok: false, error: pausedError });
                   return;
                 }
                 const result = await debugEval(debugSession, expr);
-                if (result.error) json(res, 400, result);
-                else json(res, 200, result);
+                json(res, result.status ?? 200, result);
                 return;
               }
               // 数据结构可视化: 展开 vector/数组/链表为结构化 JSON
@@ -2251,8 +3394,15 @@ export async function handleApiRequest(req: http.IncomingMessage, res: http.Serv
             }
             // ---- AI ----
             if (route === "/api/ai" && method === "POST") {
-              const body = (await readBody(req)) as { messages: { role: string; content: string }[] };
-              const result = await aiChat(body.messages || []);
+              const body = (await readBody(req)) as {
+                messages: { role: string; content: string }[];
+                /** 可选：当前打开文件上下文；不传时请求体/转发行为与旧版完全一致 */
+                context?: { file?: string; selection?: string };
+              };
+              let messages = body.messages || [];
+              const ctxMsg = contextSystemMessage(body.context);
+              if (ctxMsg) messages = [ctxMsg, ...messages];
+              const result = await aiChat(messages);
               json(res, 200, result);
               return;
             }
