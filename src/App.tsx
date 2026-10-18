@@ -8,7 +8,8 @@ import { EditorPane } from "@/components/EditorPane";
 import { OutlinePanel } from "@/components/OutlinePanel";
 import { BottomPanel } from "@/components/BottomPanel";
 import { Splitter } from "@/components/Splitter";
-import { themeOf, type FileNode } from "@/types";
+import { fontFamilyToCss, themeOf, uiFontFamilyOf, uiFontSizeOf, type FileNode } from "@/types";
+import { useT } from "@/lib/i18n";
 
 // 拖动分隔条时 App 每帧都会重渲染；编辑器（内含 CodeMirror）与 App 的其余状态无关，
 // 用 memo 隔断，避免整棵编辑器子树跟着重渲染影响拖动流畅度。
@@ -48,6 +49,7 @@ function firstSource(nodes: FileNode[]): string | null {
 }
 
 export default function App() {
+  const t = useT();
   const openFiles = useIde((s) => s.openFiles);
   const activeFile = useIde((s) => s.activeFile);
   const setActive = useIde((s) => s.setActive);
@@ -57,6 +59,10 @@ export default function App() {
   const setLayout = useIde((s) => s.setLayout);
   // 配色方案：settings 里缺字段 / 非法值一律按 dark（见 types.themeOf）
   const theme = useIde((s) => themeOf(s.settings));
+  // 界面字体 / 字号：设置一改（含对话框里的即时预览）就写到根元素 CSS 变量，
+  // index.css 的 body 用 var(--ide-ui-font) / var(--ide-ui-font-size) 消费，整个非编辑器区域跟随。
+  const uiFontFamily = useIde((s) => uiFontFamilyOf(s.settings));
+  const uiFontSize = useIde((s) => uiFontSizeOf(s.settings));
 
   // 有未保存文件时拦截页面关闭/刷新：浏览器会弹出二次确认（Electron 窗口关闭同样生效）。
   // 监听挂在 window 上、每次读最新 dirty，不依赖 React 渲染时机。
@@ -76,6 +82,13 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  // 界面字体落到 <html> 的两个 CSS 变量：只改变量 → body 及其所有子元素（非编辑器区）即时跟随。
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty("--ide-ui-font", fontFamilyToCss(uiFontFamily));
+    root.style.setProperty("--ide-ui-font-size", `${uiFontSize}px`);
+  }, [uiFontFamily, uiFontSize]);
 
   // 拖动中只 set 状态（每帧实时跟手），松手时 commit=true 才写 localStorage
   const commitLayout = () => setLayout({}, true);
@@ -115,15 +128,15 @@ export default function App() {
           onCommit={commitLayout}
           min={LAYOUT_LIMITS.left.min}
           max={LAYOUT_LIMITS.left.max}
-          title={`拖动调节文件树宽度（${LAYOUT_LIMITS.left.min}–${LAYOUT_LIMITS.left.max}px）`}
-          label="调节文件树宽度"
+          title={t("app.splitter.leftTitle", { min: LAYOUT_LIMITS.left.min, max: LAYOUT_LIMITS.left.max })}
+          label={t("app.splitter.leftLabel")}
         />
 
         {/* 中间：标签页 + 编辑器 */}
         <div className="flex-1 flex flex-col min-w-0">
           <div className="flex items-center overflow-x-auto border-b border-[color:var(--ide-border)] shrink-0 min-h-9">
             {openFiles.length === 0 && (
-              <span className="text-[12px] text-[color:var(--ide-text-faint)] px-3 py-2">从左侧选择一个文件开始编辑</span>
+              <span className="text-[12px] text-[color:var(--ide-text-faint)] px-3 py-2">{t("app.selectFileHint")}</span>
             )}
             {openFiles.map((f) => (
               <div
@@ -133,7 +146,7 @@ export default function App() {
                   activeFile === f ? "bg-[color:var(--ide-bg-panel)] text-[color:var(--ide-text)] border-t-2 border-t-[color:var(--ide-accent)]" : "text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text-dim)]"
                 }`}
               >
-                {dirty[f] && <span className="w-1.5 h-1.5 rounded-full bg-[color:var(--ide-warning)] shrink-0" title="未保存" />}
+                {dirty[f] && <span className="w-1.5 h-1.5 rounded-full bg-[color:var(--ide-warning)] shrink-0" title={t("app.unsaved")} />}
                 <span>{f.split("/").pop()}</span>
                 <button
                   className="kimi-pop opacity-0 group-hover:opacity-100 p-[2px] rounded hover:bg-[color:var(--ide-selected)] text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text)]"
@@ -141,7 +154,7 @@ export default function App() {
                     e.stopPropagation();
                     // 未保存时二次确认；自动保存开启时关闭会先落盘（store.closeFile 兜底），不必确认
                     if (dirty[f] && useIde.getState().settings.autoSave !== true) {
-                      if (!window.confirm(`「${f.split("/").pop()}」有未保存的修改，关闭将丢弃这些修改。确定关闭吗？`)) return;
+                      if (!window.confirm(t("app.closeUnsavedConfirm", { name: f.split("/").pop() ?? f }))) return;
                     }
                     closeFile(f);
                   }}
@@ -160,7 +173,7 @@ export default function App() {
                   <div className="text-3xl mb-2">⚡</div>
                   Kimi C++ IDE
                   <br />
-                  <span className="text-[12px]">新建或打开一个文件开始编程</span>
+                  <span className="text-[12px]">{t("app.emptyHint")}</span>
                 </div>
               </div>
             )}
@@ -177,8 +190,8 @@ export default function App() {
           onCommit={commitLayout}
           min={LAYOUT_LIMITS.right.min}
           max={LAYOUT_LIMITS.right.max}
-          title={`拖动调节右侧面板宽度（${LAYOUT_LIMITS.right.min}–${LAYOUT_LIMITS.right.max}px）`}
-          label="调节右侧面板宽度"
+          title={t("app.splitter.rightTitle", { min: LAYOUT_LIMITS.right.min, max: LAYOUT_LIMITS.right.max })}
+          label={t("app.splitter.rightLabel")}
         />
         <aside
           className="border-l border-[color:var(--ide-border)] bg-[color:var(--ide-bg-base)] shrink-0 hidden lg:flex lg:flex-col"
@@ -202,8 +215,8 @@ export default function App() {
         onCommit={commitLayout}
         min={LAYOUT_LIMITS.bottom.min}
         max={bottomMax}
-        title={`拖动调节底部面板高度（${LAYOUT_LIMITS.bottom.min}px – 视口 60%）`}
-        label="调节底部面板高度"
+        title={t("app.splitter.bottomTitle", { min: LAYOUT_LIMITS.bottom.min })}
+        label={t("app.splitter.bottomLabel")}
       />
       <BottomPanel height={layout.bottom} />
       <Suspense fallback={null}>
