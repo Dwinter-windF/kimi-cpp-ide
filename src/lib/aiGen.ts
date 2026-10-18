@@ -16,6 +16,7 @@
 import type { EditorState } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { clipBytes, requestChat, type ChatMessage } from "@/lib/ai";
+import { t } from "@/lib/i18n";
 import type { Settings } from "@/types";
 
 /** 单次生成请求超时：按需求固定 30s（与「AI 一键修复」同一量级） */
@@ -180,7 +181,7 @@ export async function requestCodeFromComment(opts: GenRequestOptions): Promise<G
   if (out.error) return { ok: false, error: out.error };
   const code = parseGeneratedCode(out.message?.content ?? "", anchor.comment);
   if (!code.trim()) {
-    return { ok: false, error: "AI 返回的内容里没有可用代码，未修改文档。可以写更具体的注释后重试。" };
+    return { ok: false, error: t("aiGen.errNoCode") };
   }
   return { ok: true, code };
 }
@@ -260,14 +261,14 @@ export type InsertOutcome =
 export function insertGeneratedCode(view: EditorView, anchor: CommentAnchor, rawCode: string): InsertOutcome {
   const state = view.state;
   const code = parseGeneratedCode(rawCode, anchor.comment);
-  if (!code.trim()) return { ok: false, error: "AI 返回的内容里没有可用代码，未修改文档。" };
+  if (!code.trim()) return { ok: false, error: t("aiGen.errNoCodeShort") };
 
   // 锚点校验：请求期间用户可能编辑/删除了那一行，行号会漂移，这里按「位置」重新确认注释还在
   const pos = Math.min(anchor.lineFrom, state.doc.length);
   const line = state.doc.lineAt(pos);
   const now = extractCommentAtLine(state, line.number);
   if (!now || now.comment !== anchor.comment) {
-    return { ok: false, error: "文档在生成期间已被修改，注释行已移动或改变，未插入代码。请在注释行上重新触发。" };
+    return { ok: false, error: t("aiGen.errDocChanged") };
   }
 
   const lines = reindent(code, now.indent);
