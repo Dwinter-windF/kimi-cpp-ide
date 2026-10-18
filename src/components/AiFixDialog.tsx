@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, Loader2, Sparkles, X, FileCode2, TriangleAlert } from "lucide-react";
 import { useIde } from "@/store";
+import { useT } from "@/lib/i18n";
 import { collapseEqual, diffLines, type DiffItem } from "@/lib/diff";
 
 /**
@@ -13,6 +14,7 @@ import { collapseEqual, diffLines, type DiffItem } from "@/lib/diff";
  *  · 配色全部走 --ide-* 变量 + .kimi-* 动画类，亮暗主题自动适配，动画 ≤250ms。
  */
 export function AiFixDialog() {
+  const t = useT();
   const aiFix = useIde((s) => s.aiFix);
   const closeAiFix = useIde((s) => s.closeAiFix);
   const applyAiFix = useIde((s) => s.applyAiFix);
@@ -65,22 +67,22 @@ export function AiFixDialog() {
         className="kimi-dialog-pop w-[min(1100px,94vw)] h-[min(760px,90vh)] flex flex-col rounded-xl border border-[color:var(--ide-border-strong)] bg-[color:var(--ide-bg-panel)] text-[color:var(--ide-text)] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label="AI 一键修复预览"
+        aria-label={t("bottom.aiFix")}
       >
         {/* 头部 */}
         <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[color:var(--ide-border)] shrink-0">
           <Sparkles size={15} className="text-[color:var(--ide-purple)] shrink-0" />
-          <span className="text-[13px] font-semibold">AI 一键修复</span>
+          <span className="text-[13px] font-semibold">{t("bottom.aiFix")}</span>
           {aiFix.status === "ready" && diff && (
             <span className="text-[11.5px] text-[color:var(--ide-text-muted)] font-mono">
-              {aiFix.files.length} 个文件 · <span className="text-[color:var(--ide-success)]">+{diff.stats.added}</span>{" "}
+              {t("aiFix.fileCount", { count: aiFix.files.length })} · <span className="text-[color:var(--ide-success)]">+{diff.stats.added}</span>{" "}
               <span className="text-[color:var(--ide-error)]">−{diff.stats.removed}</span>
             </span>
           )}
           <button
             className="kimi-pop ml-auto p-1 rounded text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-hover)]"
             onClick={closeAiFix}
-            title="拒绝并关闭（Esc）"
+            title={t("aiFix.rejectTitle")}
           >
             <X size={14} />
           </button>
@@ -90,7 +92,7 @@ export function AiFixDialog() {
         {aiFix.status === "loading" && (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-[color:var(--ide-text-muted)] text-[12.5px]">
             <Loader2 size={22} className="animate-spin text-[color:var(--ide-purple)]" />
-            正在把编译错误与相关源文件发给 AI…（30 秒超时）
+            {t("aiFix.sending")}
           </div>
         )}
 
@@ -107,7 +109,7 @@ export function AiFixDialog() {
               <div className="mt-2 text-[11.5px] leading-5 whitespace-pre-wrap text-[color:var(--ide-text-muted)]">{aiFix.note}</div>
             )}
             <div className="mt-3 text-[12px] text-[color:var(--ide-text-muted)] leading-6">
-              未对任何文件做修改。可以先在「设置 → AI 接口」检查配置，或在「AI 助手」里手动提问后重试。
+              {t("aiFix.errorHintText")}
             </div>
           </div>
         )}
@@ -132,7 +134,7 @@ export function AiFixDialog() {
                 </button>
               ))}
               {diff.stats.coarse && (
-                <span className="ml-2 text-[11px] text-[color:var(--ide-warning)] shrink-0">（改动过大，按整块替换展示）</span>
+                <span className="ml-2 text-[11px] text-[color:var(--ide-warning)] shrink-0">{t("aiFix.coarse")}</span>
               )}
             </div>
 
@@ -160,10 +162,10 @@ export function AiFixDialog() {
         <div className="flex items-center gap-2 px-4 py-2.5 border-t border-[color:var(--ide-border)] shrink-0">
           <span className="text-[11.5px] text-[color:var(--ide-text-muted)] mr-auto">
             {aiFix.status === "ready"
-              ? "接受后把修正内容写回对应文件（等同保存）；拒绝不做任何修改。"
+              ? t("aiFix.acceptHint")
               : aiFix.status === "loading"
-                ? "请求进行中…"
-                : "本次没有可应用的修改。"}
+                ? t("aiFix.requesting")
+                : t("aiFix.nothingToApply")}
           </span>
           {aiFix.status === "ready" ? (
             <>
@@ -172,16 +174,16 @@ export function AiFixDialog() {
                 onClick={closeAiFix}
                 disabled={applying}
               >
-                拒绝
+                {t("aiFix.reject")}
               </button>
               <button
                 className="kimi-pop flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-[12.5px] bg-[color:var(--ide-accent-strong)] hover:bg-[color:var(--ide-accent)] text-white disabled:opacity-40 disabled:cursor-not-allowed"
                 onClick={() => void accept()}
                 disabled={applying}
-                title={`把修正写回 ${aiFix.files.length} 个文件`}
+                title={t("aiFix.acceptTitle", { count: aiFix.files.length })}
               >
                 {applying ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
-                接受并写回
+                {t("aiFix.accept")}
               </button>
             </>
           ) : (
@@ -189,7 +191,7 @@ export function AiFixDialog() {
               className="px-3 py-1.5 rounded-md text-[12.5px] border border-[color:var(--ide-border-strong)] text-[color:var(--ide-text-dim)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-hover)]"
               onClick={closeAiFix}
             >
-              关闭
+              {t("common.close")}
             </button>
           )}
         </div>
@@ -212,12 +214,13 @@ const FG = {
 
 /** 单行 diff：两列行号 + 前缀 + 内容（等宽，长行横向滚动） */
 function DiffLine({ item }: { item: DiffItem }) {
+  const t = useT();
   if (item.kind === "skip") {
     return (
       <div className="flex items-center gap-2 px-3 py-[2px] text-[11px] text-[color:var(--ide-text-faint)] bg-[color:var(--ide-bg-panel)]">
         <span className="w-9 shrink-0" />
         <span className="w-9 shrink-0" />
-        <span>⋯ 省略 {item.count} 行未修改内容</span>
+        <span>{t("aiFix.skippedLines", { count: item.count })}</span>
       </div>
     );
   }
