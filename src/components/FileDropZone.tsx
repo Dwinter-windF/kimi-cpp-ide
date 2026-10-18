@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { FileUp } from "lucide-react";
 import { useIde } from "@/store";
+import { useT } from "@/lib/i18n";
 import {
   IMPORT_EXT_LABEL,
   collectDropEntries,
@@ -55,6 +56,7 @@ function lineClass(line: string): string {
  * dragover 时显示 kimi-drop-* 虚线高亮框（配色全部取自 --ide-* 变量），松手后显示结果提示条。
  */
 export function FileDropZone({ children }: { children: ReactNode }) {
+  const t = useT();
   const importDroppedFiles = useIde((s) => s.importDroppedFiles);
   const [dragActive, setDragActive] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -147,11 +149,11 @@ export function FileDropZone({ children }: { children: ReactNode }) {
         <div className="kimi-drop-overlay absolute inset-0 z-40 flex items-center justify-center">
           <div className="kimi-drop-card flex flex-col items-center gap-1.5 rounded-xl px-9 py-7">
             <FileUp size={30} className="text-[color:var(--ide-accent)]" />
-            <div className="text-[13.5px] text-[color:var(--ide-text)]">松开鼠标：导入到当前工作区</div>
+            <div className="text-[13.5px] text-[color:var(--ide-text)]">{t("fileDrop.release")}</div>
             <div className="text-[12px] text-[color:var(--ide-text-muted)] max-w-[330px] text-center leading-5">
-              支持 {IMPORT_EXT_LABEL}
+              {t("fileDrop.support", { exts: IMPORT_EXT_LABEL })}
               <br />
-              同名文件自动改名，单个文件 ≤ 8MB，暂不支持文件夹
+              {t("fileDrop.note")}
             </div>
           </div>
         </div>
@@ -161,7 +163,7 @@ export function FileDropZone({ children }: { children: ReactNode }) {
         <div className="absolute top-3 left-0 right-0 z-40 flex justify-center pointer-events-none">
           <div className="kimi-drop-result rounded-md px-3 py-2 max-w-[560px]">
             {busy ? (
-              <div className="text-[12.5px] text-[color:var(--ide-text-dim)]">正在导入文件…</div>
+              <div className="text-[12.5px] text-[color:var(--ide-text-dim)]">{t("fileDrop.importing")}</div>
             ) : (
               summary &&
               summaryLines(summary).map((line, i) => (
