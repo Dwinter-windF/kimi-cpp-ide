@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Boxes, Check, ChevronLeft, FileCode2, FolderTree, GraduationCap, Loader2 } from "lucide-react";
 import { useIde } from "@/store";
+import { useT } from "@/lib/i18n";
 import {
   PROJECT_TEMPLATES,
   getTemplate,
@@ -37,6 +38,7 @@ export function NewProjectDialog() {
 }
 
 function NewProjectWizard() {
+  const t = useT();
   const setOpen = useIde((s) => s.setShowNewProject);
   const createProject = useIde((s) => s.createProject);
 
@@ -101,7 +103,7 @@ function NewProjectWizard() {
     }
     // 一个文件都没写成功 / 目录建不出来：留在弹层显示中文原因
     if (r.created.length === 0) {
-      setError(r.error || "创建失败");
+      setError(r.error || t("newProject.createFailed"));
       return;
     }
     // 部分成功：列出「已创建」与「失败」两栏，让用户自己决定怎么处理
@@ -117,9 +119,9 @@ function NewProjectWizard() {
     >
       <div className="kimi-dialog-pop w-[560px] max-h-[78vh] overflow-y-auto rounded-lg border border-[color:var(--ide-border-strong)] bg-[color:var(--ide-bg-panel)] shadow-2xl p-4">
         <div className="flex items-center gap-2 mb-3">
-          <span className="text-[13px] font-semibold text-[color:var(--ide-text)]">新建项目</span>
+          <span className="text-[13px] font-semibold text-[color:var(--ide-text)]">{t("newProject.title")}</span>
           <span className="text-[11.5px] text-[color:var(--ide-text-faint)]">
-            {step === "pick" ? "第 1 步 / 2 · 选择模板" : `第 2 步 / 2 · ${tpl.nameLabel}`}
+            {step === "pick" ? t("newProject.step1") : t("newProject.step2", { label: t(`template.${tpl.id}.nameLabel`) })}
           </span>
         </div>
 
@@ -127,14 +129,14 @@ function NewProjectWizard() {
         {step === "pick" && (
           <>
             <div className="grid grid-cols-2 gap-2">
-              {PROJECT_TEMPLATES.map((t) => {
-                const active = t.id === id;
+              {PROJECT_TEMPLATES.map((tplItem) => {
+                const active = tplItem.id === id;
                 return (
                   <button
-                    key={t.id}
-                    onClick={() => pickTemplate(t)}
+                    key={tplItem.id}
+                    onClick={() => pickTemplate(tplItem)}
                     onDoubleClick={() => {
-                      pickTemplate(t);
+                      pickTemplate(tplItem);
                       setStep("name");
                     }}
                     className={`kimi-pop text-left rounded-md border px-3 py-2.5 transition-colors ${
@@ -145,20 +147,20 @@ function NewProjectWizard() {
                   >
                     <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-[color:var(--ide-text)]">
                       <span className={active ? "text-[color:var(--ide-accent)]" : "text-[color:var(--ide-text-muted)]"}>
-                        {CARD_ICON[t.id]}
+                        {CARD_ICON[tplItem.id]}
                       </span>
-                      {t.label}
+                      {t(`template.${tplItem.id}.label`)}
                       {active && <Check size={13} className="ml-auto text-[color:var(--ide-accent)]" />}
                     </div>
-                    <div className="mt-1 text-[11.5px] leading-4 text-[color:var(--ide-text-muted)]">{t.summary}</div>
+                    <div className="mt-1 text-[11.5px] leading-4 text-[color:var(--ide-text-muted)]">{t(`template.${tplItem.id}.summary`)}</div>
                   </button>
                 );
               })}
             </div>
 
             <ul className="mt-3 mb-1 text-[11.5px] leading-5 text-[color:var(--ide-text-dim)] list-disc pl-5">
-              {tpl.bullets.map((b) => (
-                <li key={b}>{b}</li>
+              {[1, 2, 3].map((n) => (
+                <li key={n}>{t(`template.${tpl.id}.bullet${n}`)}</li>
               ))}
             </ul>
           </>
@@ -168,8 +170,8 @@ function NewProjectWizard() {
         {step === "name" && !result && (
           <>
             <div className="text-[12px] text-[color:var(--ide-text-dim)] mb-2">
-              模板：<span className="text-[color:var(--ide-accent)]">{tpl.label}</span>
-              <span className="text-[color:var(--ide-text-faint)]"> · {tpl.summary}</span>
+              {t("newProject.template")}<span className="text-[color:var(--ide-accent)]">{t(`template.${tpl.id}.label`)}</span>
+              <span className="text-[color:var(--ide-text-faint)]"> · {t(`template.${tpl.id}.summary`)}</span>
             </div>
             <input
               ref={inputRef}
@@ -181,7 +183,7 @@ function NewProjectWizard() {
               onKeyDown={(e) => {
                 if (e.key === "Enter") void submit();
               }}
-              placeholder={tpl.namePlaceholder}
+              placeholder={t(`template.${tpl.id}.namePlaceholder`)}
               className="w-full bg-[color:var(--ide-bg-base)] border border-[color:var(--ide-border-strong)] rounded px-2.5 py-1.5 text-[13px] font-mono text-[color:var(--ide-text)] placeholder-[color:var(--ide-text-faint)] focus:outline-none focus:border-[color:var(--ide-accent)]"
             />
             <div className="mt-2 min-h-[16px] text-[11.5px] leading-4">
@@ -190,15 +192,15 @@ function NewProjectWizard() {
               ) : (
                 <span className="text-[color:var(--ide-text-faint)]">
                   {tpl.kind === "project"
-                    ? "名称会作为项目目录名；已存在同名目录时自动改名为 name-1。"
-                    : "名称作为文件名（自动补 .cpp）；已存在同名文件时自动改名为 name-1.cpp。"}
+                    ? t("newProject.projectNameHint")
+                    : t("newProject.fileNameHint")}
                 </span>
               )}
             </div>
 
             <div className="mt-2 rounded border border-[color:var(--ide-border)] bg-[color:var(--ide-bg-base)] p-2">
               <div className="text-[11.5px] text-[color:var(--ide-text-muted)] mb-1">
-                将创建 {preview.length} 个文件：
+                {t("newProject.previewCount", { count: preview.length })}
               </div>
               <div className="font-mono text-[11.5px] leading-5 text-[color:var(--ide-text-dim)] break-all">
                 {preview.map((p) => (
@@ -206,7 +208,7 @@ function NewProjectWizard() {
                 ))}
               </div>
               <div className="mt-1 text-[11px] text-[color:var(--ide-text-faint)]">
-                提示：文件树按既有规则跳过点号开头的目录，因此 .vscode/* 不会出现在左侧树里（文件已真实落盘）。
+                {t("newProject.previewNote")}
               </div>
             </div>
           </>
@@ -216,7 +218,7 @@ function NewProjectWizard() {
         {result && (
           <div className="text-[12px] leading-5">
             <div className="text-[color:var(--ide-success)]">
-              ✓ 已创建 {result.created.length} 个文件{result.root ? `（${result.root}）` : ""}
+              {t("newProject.created", { count: result.created.length })}{result.root ? t("newProject.createdRoot", { root: result.root }) : ""}
             </div>
             <div className="font-mono text-[11.5px] text-[color:var(--ide-text-dim)] break-all">
               {result.created.map((p) => (
@@ -225,7 +227,7 @@ function NewProjectWizard() {
             </div>
             {result.failed.length > 0 && (
               <>
-                <div className="mt-2 text-[color:var(--ide-error)]">✗ {result.failed.length} 个文件写入失败：</div>
+                <div className="mt-2 text-[color:var(--ide-error)]">{t("newProject.failedHeader", { count: result.failed.length })}</div>
                 <div className="text-[color:var(--ide-error)] break-all">
                   {result.failed.map((f) => (
                     <div key={f.path}>
@@ -234,7 +236,7 @@ function NewProjectWizard() {
                   ))}
                 </div>
                 <div className="mt-2 text-[11.5px] text-[color:var(--ide-text-faint)]">
-                  已创建的文件不会回滚（避免删不干净留下残缺目录），可直接在文件树里右键删除。
+                  {t("newProject.failedNote")}
                 </div>
               </>
             )}
@@ -251,7 +253,7 @@ function NewProjectWizard() {
               className="px-4 py-1.5 rounded text-[12px] bg-[color:var(--ide-accent-strong)] text-white hover:bg-[color:var(--ide-accent)]"
               onClick={() => setOpen(false)}
             >
-              关闭
+              {t("common.close")}
             </button>
           ) : (
             <>
@@ -260,7 +262,7 @@ function NewProjectWizard() {
                 className="px-3 py-1.5 rounded text-[12px] text-[color:var(--ide-text-dim)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-selected)] disabled:opacity-40"
                 onClick={() => (step === "pick" ? setOpen(false) : setStep("pick"))}
               >
-                {step === "pick" ? "取消" : "上一步"}
+                {step === "pick" ? t("common.cancel") : t("common.back")}
               </button>
               {step === "pick" ? (
                 <button
@@ -270,7 +272,7 @@ function NewProjectWizard() {
                     setStep("name");
                   }}
                 >
-                  下一步
+                  {t("common.next")}
                 </button>
               ) : (
                 <button
@@ -279,7 +281,7 @@ function NewProjectWizard() {
                   onClick={() => void submit()}
                 >
                   {busy && <Loader2 size={13} className="animate-spin" />}
-                  {busy ? "创建中…" : "创建"}
+                  {busy ? t("common.creating") : t("common.create")}
                 </button>
               )}
             </>
@@ -290,7 +292,7 @@ function NewProjectWizard() {
         {step === "name" && !result && (
           <div className="mt-2 flex items-center gap-1 text-[11px] text-[color:var(--ide-text-faint)]">
             <ChevronLeft size={11} />
-            Esc 取消并关闭
+            {t("newProject.escHint")}
           </div>
         )}
       </div>
