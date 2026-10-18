@@ -33,6 +33,7 @@ import {
   reindent,
   type InsertOutcome,
 } from "@/lib/aiGen";
+import { t } from "@/lib/i18n";
 import type { Settings } from "@/types";
 
 /** 请求前抓取的编辑器现场：光标位置 / 选区 / 文档快照。等待 AI 期间用它校验「光标或文件是否变了」 */
@@ -60,7 +61,9 @@ export const INSERT_CONTEXT_BYTES = 12 * 1024;
 /** 大文件截断时保住「光标附近」的行数：上下各 60 行（需求 1 的「上下文行数上限说明」） */
 export const INSERT_CONTEXT_LINES = 60;
 /** 上下文说明文案（渲染在对话框里，让用户知道 AI 看到的是什么范围） */
-export const CONTEXT_SCOPE_HINT = `自动带上当前文件全文；文件超过 12 KB 时只取光标上下各 ${INSERT_CONTEXT_LINES} 行`;
+export function contextScopeHint(): string {
+  return t("aiInsert.contextScope", { lines: INSERT_CONTEXT_LINES });
+}
 
 // ===========================================================================
 // ① 抓取现场 + 组装上下文
@@ -174,9 +177,9 @@ export interface InsertRequestOptions {
 export async function requestCodeFromInstruction(opts: InsertRequestOptions): Promise<InsertRequestResult> {
   const { settings, file, context, instruction, signal } = opts;
   const text = instruction.trim();
-  if (!text) return { ok: false, error: "请先输入一句指令，例如「给这个类加一个打印函数」。" };
+  if (!text) return { ok: false, error: t("aiInsert.errEmptyInstruction") };
   if (!isAiConfigured(settings)) {
-    return { ok: false, error: "未配置 AI 接口。请在「设置 → AI 接口」中填写接口地址与密钥后使用。" };
+    return { ok: false, error: t("aiInsert.errNotConfigured") };
   }
   const out = await requestChat(settings, buildInsertMessages(file, context, text), {
     tools: false,
@@ -188,7 +191,7 @@ export async function requestCodeFromInstruction(opts: InsertRequestOptions): Pr
   // 清洗：复用 aiGen.parseGeneratedCode（剥围栏/引导语/首尾空行，并把模型抄回来的指令行去掉）
   const code = parseGeneratedCode(out.message?.content ?? "", text);
   if (!code.trim()) {
-    return { ok: false, error: "AI 返回的内容里没有可用代码，未修改文档。可以换一种说法后重试。" };
+    return { ok: false, error: t("aiInsert.errNoCode") };
   }
   return { ok: true, code };
 }
@@ -237,13 +240,13 @@ export function buildInsertTransaction(
 ): { outcome: InsertOutcome; tr: Transaction | null } {
   const code = parseGeneratedCode(rawCode);
   if (!code.trim()) {
-    return { outcome: { ok: false, error: "AI 返回的内容里没有可用代码，未修改文档。" }, tr: null };
+    return { outcome: { ok: false, error: t("aiInsert.errNoCodeShort") }, tr: null };
   }
 
   // 校验 1：文档未被改动（内容 + 长度双保险，长度比对是为了快速短路）
   if (state.doc.length !== ctx.docLength || state.doc.toString() !== ctx.doc) {
     return {
-      outcome: { ok: false, error: "文档在生成期间已被修改，未插入代码。请把光标放到想要的位置后重新触发 Ctrl+Alt+I。" },
+      outcome: { ok: false, error: t("aiInsert.errDocChanged") },
       tr: null,
     };
   }
@@ -251,7 +254,7 @@ export function buildInsertTransaction(
   const sel = state.selection.main;
   if (sel.head !== ctx.cursor || sel.from !== ctx.selFrom || sel.to !== ctx.selTo) {
     return {
-      outcome: { ok: false, error: "光标位置在生成期间已移动，未插入代码。请把光标放到想要的位置后重新触发 Ctrl+Alt+I。" },
+      outcome: { ok: false, error: t("aiInsert.errCursorMoved") },
       tr: null,
     };
   }
