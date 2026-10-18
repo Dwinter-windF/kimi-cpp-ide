@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Plus, X, Eye, CircleDot, Box, Network } from "lucide-react";
 import { useIde } from "@/store";
+import { useT } from "@/lib/i18n";
 
 const CPP_KEYWORDS = new Set([
   "auto", "break", "case", "catch", "char", "class", "const", "continue", "default", "delete",
@@ -12,6 +13,7 @@ const CPP_KEYWORDS = new Set([
 ]);
 
 export function WatchPanel() {
+  const t = useT();
   const watchExprs = useIde((s) => s.watchExprs);
   const watchValues = useIde((s) => s.watchValues);
   const watchErrors = useIde((s) => s.watchErrors);
@@ -66,7 +68,7 @@ export function WatchPanel() {
       {/* 监视变量 */}
       <div className="px-3 py-2 border-b border-[color:var(--ide-border)] flex items-center justify-between">
         <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase flex items-center gap-1">
-          <Eye size={12} /> 监视变量
+          <Eye size={12} /> {t("watch.title")}
         </span>
       </div>
       <div className="px-2 py-2 border-b border-[color:var(--ide-border)] space-y-2">
@@ -75,7 +77,7 @@ export function WatchPanel() {
             value={expr}
             onChange={(e) => setExpr(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && add()}
-            placeholder="输入表达式，如 n、v[0]、p->x"
+            placeholder={t("watch.placeholder")}
             list="watch-candidates"
             className="flex-1 bg-[color:var(--ide-bg-panel)] border border-[color:var(--ide-border-strong)] rounded px-2 py-1 text-[12px] text-[color:var(--ide-text)] placeholder-[color:var(--ide-text-faint)] focus:outline-none focus:border-[color:var(--ide-accent)]"
           />
@@ -84,7 +86,7 @@ export function WatchPanel() {
               <option key={c} value={c} />
             ))}
           </datalist>
-          <button onClick={() => add()} className="kimi-pop px-2 rounded bg-[color:var(--ide-selected)] text-[color:var(--ide-text)] hover:bg-[color:var(--ide-accent-strong)]" title="添加监视">
+          <button onClick={() => add()} className="kimi-pop px-2 rounded bg-[color:var(--ide-selected)] text-[color:var(--ide-text)] hover:bg-[color:var(--ide-accent-strong)]" title={t("watch.addTitle")}>
             <Plus size={14} />
           </button>
         </div>
@@ -92,7 +94,7 @@ export function WatchPanel() {
         {candidates.length > 0 && (
           <div className="flex flex-wrap gap-1">
             <span className="text-[11px] text-[color:var(--ide-text-muted)] w-full">
-              {stopped ? "当前变量（点击加入监视）：" : "代码中的变量（点击加入监视）："}
+              {stopped ? t("watch.candidatesStopped") : t("watch.candidatesCode")}
             </span>
             {candidates.map((c) => {
               const watched = watchExprs.includes(c);
@@ -101,7 +103,7 @@ export function WatchPanel() {
                   key={c}
                   disabled={watched}
                   onClick={() => add(c)}
-                  title={watched ? "已在监视中" : `监视 ${c}`}
+                  title={watched ? t("watch.alreadyWatched") : t("watch.watchExpr", { expr: c })}
                   className={`px-1.5 py-[2px] rounded text-[11px] font-mono border transition-colors ${
                     watched
                       ? "border-[color:var(--ide-selected)] text-[color:var(--ide-text-muted)] cursor-default"
@@ -120,7 +122,7 @@ export function WatchPanel() {
       <div className="flex-1 overflow-y-auto min-h-0">
         {watchExprs.length === 0 && (
           <div className="text-[12px] text-[color:var(--ide-text-faint)] px-3 py-2">
-            添加表达式后，调试停在断点时会实时显示其值。
+            {t("watch.emptyHint")}
           </div>
         )}
         {watchExprs.map((e) => (
@@ -143,12 +145,12 @@ export function WatchPanel() {
                 </span>
               )
             ) : (
-              <span className="text-[color:var(--ide-text-faint)]">未调试</span>
+              <span className="text-[color:var(--ide-text-faint)]">{t("watch.notDebugging")}</span>
             )}
             {stopped && (
               <button
                 className="opacity-0 group-hover:opacity-100 text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-accent)]"
-                title={`可视化 ${e}（数据结构图）`}
+                title={t("watch.visualize", { expr: e })}
                 onClick={() => void showViz(e)}
               >
                 <Network size={12} />
@@ -164,12 +166,12 @@ export function WatchPanel() {
         {stopped && locals.length > 0 && (
           <>
             <div className="px-3 py-2 border-t border-b border-[color:var(--ide-border)] mt-2 flex items-center justify-between">
-              <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase">当前局部变量</span>
+              <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase">{t("watch.localsTitle")}</span>
               <button
                 className="text-[11px] text-[color:var(--ide-accent)] hover:text-[color:var(--ide-text)]"
                 onClick={() => locals.forEach((l) => !watchExprs.includes(l.name) && addWatch(l.name))}
               >
-                全部监视
+                {t("watch.watchAll")}
               </button>
             </div>
             {locals.map((l) => (
@@ -181,7 +183,7 @@ export function WatchPanel() {
                 {!watchExprs.includes(l.name) && (
                   <button
                     className="opacity-0 group-hover:opacity-100 text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-accent)]"
-                    title={`监视 ${l.name}`}
+                    title={t("watch.watchExpr", { expr: l.name })}
                     onClick={() => addWatch(l.name)}
                   >
                     <Plus size={12} />
@@ -190,7 +192,7 @@ export function WatchPanel() {
                 {stopped && (
                   <button
                     className="opacity-0 group-hover:opacity-100 text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-accent)]"
-                    title={`可视化 ${l.name}（数据结构图）`}
+                    title={t("watch.visualize", { expr: l.name })}
                     onClick={() => void showViz(l.name)}
                   >
                     <Network size={12} />
@@ -204,9 +206,9 @@ export function WatchPanel() {
         {/* 断点列表 */}
         <div className="px-3 py-2 border-t border-b border-[color:var(--ide-border)] mt-2 flex items-center gap-1">
           <CircleDot size={12} className="text-[color:var(--ide-error)]" />
-          <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase">断点 ({bpList.length})</span>
+          <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase">{t("watch.breakpoints", { count: bpList.length })}</span>
         </div>
-        {bpList.length === 0 && <div className="text-[12px] text-[color:var(--ide-text-faint)] px-3 py-2">点击编辑器行号左侧空白处添加断点。</div>}
+        {bpList.length === 0 && <div className="text-[12px] text-[color:var(--ide-text-faint)] px-3 py-2">{t("watch.breakpointsEmpty")}</div>}
         {bpList.map((bp) => (
           <div
             key={bp.file + ":" + bp.line}
@@ -236,7 +238,7 @@ export function WatchPanel() {
         {debugStopped && (
           <>
             <div className="px-3 py-2 border-t border-[color:var(--ide-border)] mt-2">
-              <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase">当前位置</span>
+              <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase">{t("watch.currentPos")}</span>
             </div>
             <div className="px-3 py-1 text-[12px] text-[color:var(--ide-warning)] font-mono">
               {debugStopped.func || "?"}
