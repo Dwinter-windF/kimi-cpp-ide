@@ -15,6 +15,7 @@
  *  4. 编译器路径写死为本机真实的 MSYS2 UCRT64 工具链（与 cpp-ide-data/settings.json 一致），
  *     由常量 TOOLCHAIN 统一维护，避免 4 个模板各写一份路径。
  */
+import { t } from "@/lib/i18n";
 
 // ---------------------------------------------------------------------------
 // 工具链路径（.vscode 风格的 tasks.json / launch.json 用）
@@ -412,18 +413,18 @@ const CPP_EXT = /\.(cpp|cc|cxx|c)$/i;
  */
 export function validateProjectName(raw: string, kind: TemplateKind): string | undefined {
   const name = raw.trim();
-  if (!name) return "请先输入名称";
-  if (name.length > 60) return `名称最多 60 个字符（当前 ${name.length} 个）`;
+  if (!name) return t("templateValidate.required");
+  if (name.length > 60) return t("templateValidate.tooLong", { length: name.length });
   if (ILLEGAL_CHAR.test(name) || hasControlChar(name)) {
-    return '名称不能包含下列字符：< > : " / \\ | ? * 或控制字符（Windows 文件名限制）';
+    return t("templateValidate.illegal");
   }
-  if (/[. ]$/.test(name)) return "名称不能以点或空格结尾";
-  if (/^\.+$/.test(name)) return "名称不能只由点组成";
+  if (/[. ]$/.test(name)) return t("templateValidate.endDot");
+  if (/^\.+$/.test(name)) return t("templateValidate.onlyDots");
   if (kind === "file" && /\.[^.]*$/.test(name) && !CPP_EXT.test(name)) {
-    return "空文件模板只支持 .cpp / .cc / .cxx / .c 后缀（也可以只写主文件名，如 main）";
+    return t("templateValidate.ext");
   }
   const stem = kind === "file" ? name.replace(CPP_EXT, "") : name;
-  if (RESERVED_NAME.test(stem)) return `「${stem}」是 Windows 保留名（CON / NUL / COM1…），请换一个名称`;
+  if (RESERVED_NAME.test(stem)) return t("templateValidate.reserved", { name: stem });
   return undefined;
 }
 
