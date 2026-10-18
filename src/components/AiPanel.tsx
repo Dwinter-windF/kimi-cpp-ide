@@ -2,6 +2,9 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Sparkles, Send, Trash2, User, Bot, CircleAlert, Settings2 } from "lucide-react";
 import { useIde } from "@/store";
 import { runToolLoop, type ChatMessage } from "@/lib/ai";
+import { getActiveEditor } from "@/lib/editorRegistry";
+import { useT } from "@/lib/i18n";
+import type { AiContext } from "@/types";
 
 // 气泡内的 Markdown 渲染只在有 AI 回复时才需要，拆成独立 chunk 懒加载。
 const MarkdownLite = lazy(() =>
@@ -10,6 +13,31 @@ const MarkdownLite = lazy(() =>
 
 // AI 请求 / 工作区文件工具 / 工具调用循环都抽到 src/lib/ai.ts，
 // 与「AI 一键修复」（src/lib/aiFix.ts）共用同一份实现，这里只留 UI 与聊天记录维护。
+
+/** 选中文本按 UTF-8 字节截断到 2KB（避免中文按字符切片超限） */
+const CONTEXT_SELECTION_LIMIT = 2048;
+function clipSelection(text: string): string {
+  const enc = new TextEncoder();
+  const bytes = enc.encode(text);
+  if (bytes.length <= CONTEXT_SELECTION_LIMIT) return text;
+  return new TextDecoder().decode(bytes.slice(0, CONTEXT_SELECTION_LIMIT)).replace(/\uFFFD+$/, "");
+}
+
+/**
+ * 采集当前打开文件上下文：文件名 + 工作区相对路径 + 当前选中文本（若有，≤2KB）。
+ * 没有打开文件时返回 undefined，聊天请求与旧版完全一致。
+ */
+function collectAiContext(): AiContext | undefined {
+  const st = useIde.getState();
+  if (!st.activeFile) return undefined;
+  let selection = "";
+  const view = getActiveEditor();
+  if (view) {
+    const range = view.state.selection.main;
+    if (!range.empty) selection = clipSelection(view.state.sliceDoc(range.from, range.to));
+  }
+  return { file: st.activeFile, ...(selection.trim() ? { selection } : {}) };
+}
 
 function TypingDots() {
   return (
@@ -26,6 +54,7 @@ function TypingDots() {
 }
 
 export function AiPanel() {
+  const t = useT();
   const aiMessages = useIde((s) => s.aiMessages);
   const aiBusy = useIde((s) => s.aiBusy);
   const clearAi = useIde((s) => s.clearAi);
@@ -77,6 +106,8 @@ export function AiPanel() {
     const out = await runToolLoop({
       settings: st.settings,
       history,
+      // 当前文件 + 选中文本作为 system 附加消息随每次请求发送（不写入聊天历史）
+      context: collectAiContext(),
       onAction: (actions) => setPendingActions(actions),
     });
 
@@ -95,10 +126,10 @@ export function AiPanel() {
   };
 
   const send = () => {
-    const t = input.trim();
-    if (!t || aiBusy) return;
+    const text = input.trim();
+    if (!text || aiBusy) return;
     setInput("");
-    void runChat(t);
+    void runChat(text);
   };
 
   const quickAsk = (prompt: string) => {
@@ -108,36 +139,38 @@ export function AiPanel() {
 
   const quickCards = [
     {
-      label: "解释当前代码",
+      label: t("ai.quick.explain"),
       icon: "📖",
       disabled: !activeFile,
       run: () =>
-        quickAsk(`请解释下面这段 C/C++ 代码的功能和关键逻辑（用中文，简明扼要）：\n\n\`\`\`cpp\n${(contents[activeFile || ""] || "").slice(0, 3000)}\n\`\`\``),
+        quickAsk(t("ai.prompt.explain", { code: (contents[activeFile || ""] || "").slice(0, 3000) })),
     },
     {
-      label: "分析编译错误",
+      label: t("ai.quick.analyze"),
       icon: "🩺",
       disabled: problems.length === 0,
       run: () =>
         quickAsk(
-          `我的 C/C++ 程序有以下编译问题，请分析原因并给出修改建议（用中文）：\n\n${problems
-            .slice(0, 10)
-            .map((p) => `${p.file}:${p.line}:${p.col} ${p.severity}: ${p.message}`)
-            .join("\n")}`
+          t("ai.prompt.analyze", {
+            errors: problems
+              .slice(0, 10)
+              .map((p) => `${p.file}:${p.line}:${p.col} ${p.severity}: ${p.message}`)
+              .join("\n"),
+          })
         ),
     },
     {
-      label: "检查代码问题",
+      label: t("ai.quick.check"),
       icon: "🐞",
       disabled: !activeFile,
       run: () =>
-        quickAsk(`请检查下面这段 C/C++ 代码有没有 bug、内存安全隐患或可改进之处，并给出修改后的代码（用中文说明）：\n\n\`\`\`cpp\n${(contents[activeFile || ""] || "").slice(0, 3000)}\n\`\`\``),
+        quickAsk(t("ai.prompt.check", { code: (contents[activeFile || ""] || "").slice(0, 3000) })),
     },
     {
-      label: "帮我改工作区文件",
+      label: t("ai.quick.edit"),
       icon: "🛠",
       disabled: false,
-      run: () => setInput("请先列出当前工作区的文件，然后读取 main.cpp 并说明它的作用。"),
+      run: () => setInput(t("ai.prompt.edit")),
     },
   ];
 
@@ -149,11 +182,11 @@ export function AiPanel() {
           <Sparkles size={12} className="text-[color:var(--ide-purple)]" />
           {aiConfigured ? (
             <>
-              已连接模型 <span className="text-[color:var(--ide-purple)] font-mono">{aiModel || "默认"}</span>
-              <span className="text-[color:var(--ide-text-faint)]">· 可读写工作区文件</span>
+              {t("ai.connected", { model: aiModel || t("ai.defaultModel") })}
+              <span className="text-[color:var(--ide-text-faint)]">{t("ai.workspaceAccess")}</span>
             </>
           ) : (
-            "未配置 AI 接口"
+            t("ai.notConfigured")
           )}
         </span>
         <div className="flex items-center gap-1">
@@ -161,21 +194,29 @@ export function AiPanel() {
             <button
               onClick={() => setShowSettings(true)}
               className="flex items-center gap-1 px-2 py-[3px] rounded text-[11px] text-[color:var(--ide-warning)] hover:bg-[color:var(--ide-hover)]"
-              title="打开设置配置 AI 接口"
+              title={t("ai.openSettings")}
             >
-              <Settings2 size={12} /> 去配置
+              <Settings2 size={12} /> {t("ai.gotoConfig")}
             </button>
           )}
           {aiMessages.length > 0 && (
             <button
               onClick={clearAi}
               className="flex items-center gap-1 px-2 py-[3px] rounded text-[11px] text-[color:var(--ide-text-muted)] hover:text-[color:var(--ide-error)] hover:bg-[color:var(--ide-hover)]"
-              title="清空对话"
+              title={t("ai.clearTitle")}
             >
-              <Trash2 size={12} /> 清空
+              <Trash2 size={12} /> {t("ai.clear")}
             </button>
           )}
         </div>
+      </div>
+
+      {/* 当前文件上下文（静态小字，随当前打开文件实时更新） */}
+      <div
+        className="px-3 py-[3px] border-b border-[color:var(--ide-border)] text-[10.5px] leading-4 text-[color:var(--ide-text-muted)] font-mono truncate shrink-0"
+        title={activeFile || t("ai.context.noFile")}
+      >
+        {t("ai.context.currentFile", { file: activeFile || t("ai.context.noFile") })}
       </div>
 
       {/* 消息区 */}
@@ -185,13 +226,13 @@ export function AiPanel() {
             <div className="w-10 h-10 rounded-xl bg-[color:var(--ide-selected)] flex items-center justify-center mb-2">
               <Sparkles size={18} className="text-[color:var(--ide-purple)]" />
             </div>
-            <div className="text-[13px] text-[color:var(--ide-text)] font-semibold mb-1">AI 编程助手</div>
+            <div className="text-[13px] text-[color:var(--ide-text)] font-semibold mb-1">{t("ai.title")}</div>
             <div className="text-[11.5px] text-[color:var(--ide-text-muted)] mb-3 leading-5">
-              解释代码、分析编译错误、查 bug、辅助写代码
+              {t("ai.subtitle")}
               <br />
               {aiConfigured
-                ? "可以直接让我读取 / 修改工作区里的文件。"
-                : "先在「设置 → AI 接口」配置任意兼容 OpenAI 的 API。"}
+                ? t("ai.canReadWrite")
+                : t("ai.configFirst")}
             </div>
             <div className="grid grid-cols-2 gap-1.5 w-full max-w-md">
               {quickCards.map((c) => (
@@ -297,7 +338,7 @@ export function AiPanel() {
               send();
             }
           }}
-          placeholder={aiConfigured ? "提问或描述需求，Enter 发送，Shift+Enter 换行" : "先在「设置 → AI 接口」配置后使用"}
+          placeholder={aiConfigured ? t("ai.placeholder") : t("ai.placeholderUnconfigured")}
           className="flex-1 resize-none bg-[color:var(--ide-bg-panel)] border border-[color:var(--ide-border-strong)] rounded-lg px-2.5 py-1.5 text-[12.5px] text-[color:var(--ide-text)] placeholder-[color:var(--ide-text-faint)] focus:outline-none focus:border-[color:var(--ide-accent)] disabled:opacity-50 leading-relaxed"
           style={{ maxHeight: "120px" }}
         />
@@ -305,7 +346,7 @@ export function AiPanel() {
           className="kimi-pop p-2 rounded-lg bg-[color:var(--ide-accent-strong)] hover:bg-[color:var(--ide-accent)] text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
           disabled={!input.trim() || aiBusy || !aiConfigured}
           onClick={send}
-          title="发送 (Enter)"
+          title={t("ai.send")}
         >
           <Send size={14} />
         </button>
