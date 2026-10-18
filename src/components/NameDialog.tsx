@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useIde } from "@/store";
+import { useT } from "@/lib/i18n";
 
 /** 应用内命名对话框（替代浏览器原生 prompt，内嵌环境不支持） */
 export function NameDialog() {
+  const t = useT();
   const dlg = useIde((s) => s.nameDialog);
   const closeNameDialog = useIde((s) => s.closeNameDialog);
   const [val, setVal] = useState("");
@@ -52,14 +54,14 @@ export function NameDialog() {
             className="px-3 py-1.5 rounded text-[12px] text-[color:var(--ide-text-dim)] hover:text-[color:var(--ide-text)] hover:bg-[color:var(--ide-selected)]"
             onClick={closeNameDialog}
           >
-            取消
+            {t("common.cancel")}
           </button>
           <button
             disabled={!val.trim()}
             className="px-4 py-1.5 rounded text-[12px] bg-[color:var(--ide-accent-strong)] text-white hover:bg-[color:var(--ide-accent)] disabled:opacity-40 disabled:cursor-not-allowed"
             onClick={submit}
           >
-            确定
+            {t("common.ok")}
           </button>
         </div>
       </div>
