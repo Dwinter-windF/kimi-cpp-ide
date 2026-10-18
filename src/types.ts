@@ -1,3 +1,5 @@
+import type { LanguageId } from "@/lib/i18n";
+
 export interface Diagnostic {
   file: string;
   line: number;
@@ -19,6 +21,8 @@ export interface Toolchain {
   cc: ToolInfo;
   cxx: ToolInfo;
   gdb: ToolInfo;
+  /** clang-format（新增可选字段：旧服务端不返回时按不可用处理） */
+  clangFormat?: ToolInfo;
 }
 
 /** 全局配色方案 */
@@ -28,6 +32,8 @@ export interface Settings {
   compilerC?: string;
   compilerCpp?: string;
   gdbPath?: string;
+  /** clang-format 可执行文件路径（留空自动从 PATH 查找；用于「格式化文档」） */
+  clangFormatPath?: string;
   std?: string;
   buildMode?: string; // "debug"（默认 -g -O0）| "release"（-O2）
   extraFlags?: string; // 自定义编译参数，空格分隔，如 "-DDEBUG -lm"
@@ -41,6 +47,11 @@ export interface Settings {
    * 可选字段：旧 settings.json 没有该字段、或写入非法值时一律按 "dark" 处理（向后兼容）。
    */
   theme?: ThemeName;
+  /**
+   * 界面语言（持久化在 cpp-ide-data/settings.json）。
+   * 可选字段：旧 settings.json 没有该字段、或写入非法值时一律按 "zh-CN" 处理（向后兼容）。
+   */
+  language?: LanguageId;
   // 编辑器功能开关（均为可选：旧的 settings.json 没有这些字段时按“开”处理）
   highlightSelectionMatches?: boolean; // 划词相同词高亮（仅标识符/关键字）
   highlightBracketPairs?: boolean; // 括号匹配高亮
@@ -50,6 +61,25 @@ export interface Settings {
   autoSave?: boolean;
   /** 撤销历史最大步数（默认 500，合法范围 10–5000；调整后会重置已打开文件的撤销历史） */
   maxUndoSteps?: number;
+  // -------------------------------------------------------------------------
+  // 字体（均为可选：旧 settings.json 没有这些字段时用下面的默认值，向后兼容）
+  // -------------------------------------------------------------------------
+  /** 界面字体族（非编辑器区域；默认 "Segoe UI"，写入 --ide-ui-font） */
+  uiFontFamily?: string;
+  /** 界面字号 px（默认 13，合法范围 11–18，写入 --ide-ui-font-size） */
+  uiFontSize?: number;
+  /** 编辑器字体族（CodeMirror 代码区；默认 Consolas / 微软雅黑 / monospace 风格） */
+  editorFontFamily?: string;
+  /** 编辑器字号 px（默认 14，合法范围 10–32） */
+  editorFontSize?: number;
+  /** 编辑器 Tab 宽度（默认 4，合法范围 1–8） */
+  editorTabSize?: number;
+  /**
+   * 调试求值控制台门控：开始调试前勾选，值为 true 才允许在暂停时对表达式求值。
+   * 可选字段：旧 settings.json 没有该字段时按 false 处理（见 evalConsoleOf）；
+   * 开始调试时会把当时的值快照进调试会话，运行中修改不影响已启动的会话。
+   */
+  evalConsole?: boolean;
 }
 
 /** 编辑器功能开关的字段名 */
@@ -61,6 +91,14 @@ export type EditorFlag = "highlightSelectionMatches" | "highlightBracketPairs" |
  */
 export function editorFlagOn(s: Settings | undefined, flag: EditorFlag): boolean {
   return s?.[flag] !== false;
+}
+
+/**
+ * 读取「调试求值控制台」门控。
+ * 字段缺失（旧 settings.json）或任何非 true 值一律视为 false（默认关闭）。
+ */
+export function evalConsoleOf(s: Settings | undefined): boolean {
+  return s?.evalConsole === true;
 }
 
 /** 撤销历史最大步数默认值 */
@@ -84,6 +122,86 @@ export function maxUndoStepsOf(s: Settings | undefined): number {
  */
 export function themeOf(s: Settings | undefined): ThemeName {
   return s?.theme === "light" ? "light" : "dark";
+}
+
+/**
+ * 读取界面语言。
+ * 字段缺失（旧版 cpp-ide-data/settings.json）或为其它值时一律视为 "zh-CN"，
+ * 保证升级前的用户界面观感完全不变。
+ */
+export function languageOf(s: Settings | undefined): LanguageId {
+  return s?.language === "en-US" ? "en-US" : "zh-CN";
+}
+
+// ---------------------------------------------------------------------------
+// 字体设置
+// ---------------------------------------------------------------------------
+
+/** 界面字体默认值（系统默认的西文字体；CSS 里还会追加中文/无衬线兜底） */
+export const DEFAULT_UI_FONT_FAMILY = "Segoe UI";
+/** 界面字号默认值 */
+export const DEFAULT_UI_FONT_SIZE = 13;
+/** 界面字号合法范围 */
+export const UI_FONT_SIZE_RANGE = { min: 11, max: 18 } as const;
+
+/** 编辑器字体默认值（等宽字体优先，附中文兜底） */
+export const DEFAULT_EDITOR_FONT_FAMILY = "Consolas, 'Microsoft YaHei', '微软雅黑', monospace";
+/** 编辑器字号默认值 */
+export const DEFAULT_EDITOR_FONT_SIZE = 14;
+/** 编辑器字号合法范围 */
+export const EDITOR_FONT_SIZE_RANGE = { min: 10, max: 32 } as const;
+
+/** 编辑器 Tab 宽度默认值 / 合法范围 */
+export const DEFAULT_EDITOR_TAB_SIZE = 4;
+export const EDITOR_TAB_SIZE_RANGE = { min: 1, max: 8 } as const;
+
+/** 字号收敛：非数字回落到默认值，越界夹到合法区间并取整 */
+function fontSizeOf(value: unknown, fallback: number, range: { min: number; max: number }): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(range.max, Math.max(range.min, Math.round(value)));
+}
+
+/** 字体族收敛：缺字段 / 空白 / 非字符串时回落到默认值 */
+function fontFamilyOf(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const v = value.replace(/[;{}]/g, "").trim().slice(0, 200);
+  return v || fallback;
+}
+
+/** 读取界面字体族（缺字段 / 非法值 → 默认 "Segoe UI"） */
+export function uiFontFamilyOf(s: Settings | undefined): string {
+  return fontFamilyOf(s?.uiFontFamily, DEFAULT_UI_FONT_FAMILY);
+}
+
+/** 读取界面字号（缺字段 / 非法值 → 13；越界夹到 11–18） */
+export function uiFontSizeOf(s: Settings | undefined): number {
+  return fontSizeOf(s?.uiFontSize, DEFAULT_UI_FONT_SIZE, UI_FONT_SIZE_RANGE);
+}
+
+/** 读取编辑器字体族（缺字段 / 非法值 → 默认等宽字体栈） */
+export function editorFontFamilyOf(s: Settings | undefined): string {
+  return fontFamilyOf(s?.editorFontFamily, DEFAULT_EDITOR_FONT_FAMILY);
+}
+
+/** 读取编辑器字号（缺字段 / 非法值 → 14；越界夹到 10–32） */
+export function editorFontSizeOf(s: Settings | undefined): number {
+  return fontSizeOf(s?.editorFontSize, DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_SIZE_RANGE);
+}
+
+/** 读取编辑器 Tab 宽度（缺字段 / 非法值 → 4；越界夹到 1–8） */
+export function editorTabSizeOf(s: Settings | undefined): number {
+  return fontSizeOf(s?.editorTabSize, DEFAULT_EDITOR_TAB_SIZE, EDITOR_TAB_SIZE_RANGE);
+}
+
+/** 把任意字体族值转成可安全写进 CSS 的字体栈（单个含空格的族名自动加引号） */
+export function fontFamilyToCss(value: string | undefined): string {
+  const v = fontFamilyOf(value, DEFAULT_UI_FONT_FAMILY);
+  // 含逗号 → 已是字体栈，原样使用（fontFamilyOf 已清掉可能破坏声明的字符）；
+  // 已自带成对引号 → 也原样使用；单个族名（如 Microsoft YaHei）需要加引号，
+  // 否则空格会被 CSS 当成多个族名。
+  if (v.includes(",")) return v;
+  if (/^(['"]).*\1$/.test(v)) return v;
+  return `"${v.replace(/["\\]/g, "")}"`;
 }
 
 export interface FileNode {
@@ -171,8 +289,44 @@ export interface VizNode {
   fields: VizField[];
 }
 
+/** std::map / std::set 的一行（map 有 key；set 只有 value） */
+export interface VizTableEntry {
+  key?: string;
+  value: string;
+  type?: string;
+}
+
+/** 二叉树节点（id 为地址；left/right 指向 nodes 里的 id） */
+export interface VizTreeNode {
+  id: string;
+  addr?: string;
+  /** 节点上用于展示的值（优先 val/value/data/key/id/name） */
+  label: string;
+  fields?: VizField[];
+  left?: string | null;
+  right?: string | null;
+}
+
+/** 二维数组 / vector<vector> 的表格数据 */
+export interface VizGrid {
+  rows: { label: string; cells: VizField[] }[];
+  cols: number;
+}
+
+export type VizKind =
+  | "vector"
+  | "array"
+  | "list"
+  | "struct"
+  | "scalar"
+  | "error"
+  | "map"
+  | "set"
+  | "tree"
+  | "grid";
+
 export interface VizData {
-  kind: "vector" | "array" | "list" | "struct" | "scalar" | "error";
+  kind: VizKind;
   expr?: string;
   /** GDB 类型串，如 std::vector<int> / int [10] / Node * */
   type?: string;
@@ -182,18 +336,54 @@ export interface VizData {
   elems?: VizField[];
   /** 链表的节点序列 */
   nodes?: VizNode[];
+  /** map/set 的键值行（map 按中序展示；set 仅 value） */
+  entries?: VizTableEntry[];
+  /** 二叉树（root 为 nodes 里的 id） */
+  tree?: { root: string; nodes: VizTreeNode[]; cycle?: boolean; truncated?: boolean };
+  /** 二维表格（行/列索引由前端补角标） */
+  grid?: VizGrid;
   /** 元素总数（可能因截断多于 elems.length） */
   total?: number;
   /** 因超出上限被截断 */
   truncated?: boolean;
   /** 链表检测到环 */
   cycle?: boolean;
+  /** 服务端返回的机器可读提示码（前端走 i18n；未知值忽略） */
+  note?: string;
+  /** 服务端返回的错误码（前端走 i18n；未知值回落到 error 文本） */
+  code?: string;
   error?: string;
 }
 
 export interface TermLine {
   kind: "in" | "out" | "err" | "sys";
   text: string;
+}
+
+/**
+ * AI 聊天附带的「当前打开文件」上下文（可选字段）。
+ * file 为工作区相对路径（如 src/main.cpp），selection 为当前选中文本（前端已截到 2KB）。
+ * 不传时服务端 / AI 请求行为与旧版完全一致。
+ */
+export interface AiContext {
+  file?: string;
+  selection?: string;
+}
+
+/** 调试求值控制台的一行历史（expr 必有；成功给 value，失败给 error） */
+export interface EvalConsoleLine {
+  expr: string;
+  value?: string;
+  error?: string;
+}
+
+/** AI 的 run 工具结果：退出码 + 最后 2KB 输出（timedOut=true 时表示等待超时） */
+export interface AiRunResult {
+  ok: boolean;
+  code?: number | null;
+  output: string;
+  timedOut?: boolean;
+  error?: string;
 }
 
 export interface AiMessage {
