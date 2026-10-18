@@ -16,6 +16,8 @@
  *  - 其余（.exe/.zip/.png/.o 等二进制或无关文件）一律拒绝并给中文提示，
  *    避免把 IDE 工作区当垃圾桶，也避免 base64 传输大体积二进制。
  */
+import { t } from "@/lib/i18n";
+
 export const IMPORT_EXTS = [
   ".c",
   ".cc",
@@ -83,7 +85,7 @@ export function readFileAsBase64(file: File): Promise<string> {
       const comma = s.indexOf(",");
       resolve(comma >= 0 ? s.slice(comma + 1) : "");
     };
-    fr.onerror = () => reject(new Error("浏览器读取文件失败"));
+    fr.onerror = () => reject(new Error(t("dropImport.readFailed")));
     fr.readAsDataURL(file);
   });
 }
@@ -104,7 +106,7 @@ export function collectDropEntries(dt: DataTransfer | null): DroppedEntry[] {
       if (it.kind !== "file") continue;
       const entry = it.webkitGetAsEntry?.() ?? null;
       if (entry?.isDirectory) {
-        out.push({ file: null, name: entry.name || "未命名文件夹", isDir: true });
+        out.push({ file: null, name: entry.name || t("dropImport.unnamedFolder"), isDir: true });
         continue;
       }
       const f = it.getAsFile();
@@ -120,9 +122,9 @@ export function collectDropEntries(dt: DataTransfer | null): DroppedEntry[] {
 /** 结果提示条 / 终端日志共用的文字行（首字符决定配色，见 FileDropZone） */
 export function summaryLines(s: ImportSummary): string[] {
   const lines: string[] = [];
-  if (s.imported.length > 0) lines.push(`✓ 成功导入 ${s.imported.length} 个文件`);
-  for (const r of s.renamed) lines.push(`· ${r.from} 同名，已导入为 ${r.to}`);
-  for (const k of s.skipped) lines.push(`✗ ${k.name}：${k.reason}`);
-  if (lines.length === 0) lines.push("没有可导入的文件");
+  if (s.imported.length > 0) lines.push(t("fileDrop.summaryImported", { count: s.imported.length }));
+  for (const r of s.renamed) lines.push(t("fileDrop.summaryRenamed", { from: r.from, to: r.to }));
+  for (const k of s.skipped) lines.push(t("fileDrop.summarySkipped", { name: k.name, reason: k.reason }));
+  if (lines.length === 0) lines.push(t("fileDrop.summaryNone"));
   return lines;
 }
