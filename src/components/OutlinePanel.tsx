@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { ListTree, ChevronRight } from "lucide-react";
 import { useIde } from "@/store";
+import { useT } from "@/lib/i18n";
 import { parseOutline } from "@/lib/outline";
 import type { OutlineItem } from "@/lib/outline";
 
@@ -13,6 +14,7 @@ const KIND_STYLE: Record<OutlineItem["kind"], { icon: string; color: string }> =
 };
 
 export function OutlinePanel() {
+  const t = useT();
   const activeFile = useIde((s) => s.activeFile);
   const content = useIde((s) => (s.activeFile ? (s.contents[s.activeFile] ?? "") : ""));
   const requestReveal = useIde((s) => s.requestReveal);
@@ -23,14 +25,14 @@ export function OutlinePanel() {
     <div className="border-b border-[color:var(--ide-border)] flex flex-col shrink-0 max-h-56">
       <div className="px-3 py-2 flex items-center justify-between">
         <span className="text-[12px] font-semibold tracking-wider text-[color:var(--ide-text-muted)] uppercase flex items-center gap-1">
-          <ListTree size={12} /> 大纲
+          <ListTree size={12} /> {t("outline.title")}
           {activeFile && <span className="normal-case tracking-normal font-normal">· {activeFile.split("/").pop()}</span>}
         </span>
-        <span className="text-[11px] text-[color:var(--ide-text-faint)]">{items.length > 0 ? `${items.length} 项` : ""}</span>
+        <span className="text-[11px] text-[color:var(--ide-text-faint)]">{items.length > 0 ? t("outline.count", { count: items.length }) : ""}</span>
       </div>
       <div className="overflow-y-auto min-h-0 pb-1">
         {items.length === 0 ? (
-          <div className="text-[11.5px] text-[color:var(--ide-text-faint)] px-3 pb-2">当前文件暂无函数 / 类 / 命名空间定义。</div>
+          <div className="text-[11.5px] text-[color:var(--ide-text-faint)] px-3 pb-2">{t("outline.empty")}</div>
         ) : (
           items.map((it, i) => {
             const st = KIND_STYLE[it.kind];
@@ -38,7 +40,7 @@ export function OutlinePanel() {
               <button
                 key={i}
                 onClick={() => activeFile && requestReveal(activeFile, it.line)}
-                title={`跳转到第 ${it.line} 行`}
+                title={t("outline.jump", { line: it.line })}
                 className="w-full flex items-center gap-1.5 px-3 py-[3px] text-[12px] hover:bg-[color:var(--ide-hover)] text-left"
                 style={{ paddingLeft: `${12 + Math.min(it.depth, 4) * 12}px` }}
               >
